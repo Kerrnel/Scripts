@@ -1,4 +1,4 @@
 # Scripts
 Short form poetry
 
-Generally Free/Net/Darwin/Linux compatible
+Generally FreeBSD/NetBSD/Darwin/Linux tested
