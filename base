@@ -1,10 +1,11 @@
 #!/bin/sh
 #
 #	Ver	Who	When	What
-#	002	GLK	201220	Fixed Base64 to match Clover
+#	003	GLK	201220	Less hangs on really big numbers with error out (not sure I got all)
+#	002	GLK	201220	Fixed Base64 to match Clover - base32 not redone yet ... don't really have a use for it
 #	001	GLK	201217	Update to work on Mac - no double arraws in awk, indeterminate "for v in array" order, fix stashing EOS
 #
-gVersion=0.02
+gVersion=0.03
 gStamped=201220
 
 # Global
@@ -12,7 +13,7 @@ DEBUG=0			# Noisy?
 FIN=''
 FOUT=''
 ARGS=''
-CHARS=''
+CHARS=''		# Not implemented - was going to capture ASCII characters is appropriate
 
 # Options
 BYTESWAP=0
@@ -78,8 +79,9 @@ Base842toDec()
 	local	i="$2"
 	local	n=0
 
-	DbgMsg "Base8toDec: $i"
+	Msg "Base842toDec: $i ($1)"
 	i="${i#0w}"
+	[ ${#i} -gt $((14 * (8 / $1))) ] && Msg "Number $i (b$1) is too large for bash, sorry" && exit 1
 	while [ -n "$i" ]; do
 		c="${i:0:1}"
 		i="${i:1}"
@@ -96,6 +98,7 @@ Base16toDec()
 
 	DbgMsg "Base16toDec: $i"
 	i="${i#0x}"
+	[ ${#i} -gt 14 ] && Msg "Number $i (b16) is too large for bash, sorry" && exit 1
 	[ $BASH_VERSINFO -gt 3 ] && i="${i,,*}" || i=$(echo "$i" | tr '[:upper:]' '[:lower:]')
 	while [ -n "$i" ]; do
 		c="${i:0:1}"
@@ -121,6 +124,8 @@ Base32toDec()
 
 	DbgMsg "Base32toDec: $i"
 	i="${i#0y}"
+	i="${i%%=*}="
+	[ ${#i} -gt 15 ] && Msg "Number $i (b32) is too large for bash, sorry" && exit 1
 	while [ -n "$i" ]; do
 		c="${i:0:1}"
 		i="${i:1}"
@@ -152,6 +157,8 @@ Base64toDec()
 
 	DbgMsg "Base64toDec: $i"
 	i="${i#0z}"
+	i="${i%%=*}="
+	[ ${#i} -gt 14 ] && Msg "Number $i (b64) is too large for bash, sorry" && exit 1
 	while [ -n "$i" ]; do
 		c="${i:0:1}"
 		i="${i:1}"
@@ -531,29 +538,38 @@ MsgVal()
 
 DoLines()
  {
-	local	line i j bs
+	local	line i j bs hd
 
 	while read line; do if [ -n "$line" ]; then
 		if [ $DATAMODE -ne 0 ]; then
 			case "$line" in
-			  *\=)	Base64decode "$line";	Msg "String : $OUT"	;;
-			  *)	Base64encode "$line";	Msg "Base 64: $OUT"	;;
+			  *\=)	Base64decode "$line";	[ $JUSTVAL -eq 0 ] && Msg "String : $OUT" || Msg "$OUT"	;;
+			  *)	Base64encode "$line";	[ $JUSTVAL -eq 0 ] && Msg "Base 64: $OUT" || Msg "$OUT"	;;
 			esac
 		else
 			for i in $line; do
 				VAL=''
 
+				# Note what we got
+				if [ $JUSTVAL -eq 0 ]; then
+					hd="Input  : $i"
+					[ -n "$FIN" ] && hd="$hd base $FIN"
+					Msg "$hd"
+				fi
+
+				# Read in if specified base
 				case "$FIN" in
 				  64)	Base64toDec $i	; VAL=$OUT	;;
 				  32)	Base32toDec $i	; VAL=$OUT	;;
 				  16)	Base16toDec $i	; VAL=$OUT	;;
-				  8)	Base842 8 $i	; VAL=$OUT	;;
-				  4)	Base842 4 $i	; VAL=$OUT	;;
-				  2)	Base842 2 $i	; VAL=$OUT	;;
-				  10)	VAL=$i
+				  8)	Base842toDec 8 $i	; VAL=$OUT	;;
+				  4)	Base842toDec 4 $i	; VAL=$OUT	;;
+				  2)	Base842toDec 2 $i	; VAL=$OUT	;;
+				  10)	VAL=$i; [ ${#i} -gt 16 ] && Msg "Number $i is too large for bash, sorry" && exit 1 ;;
 				esac
 
-				if [ -z "$VAL" ]; then	# Unspecified in args, suss it out
+				# Suss out base if not specified
+				if [ -z "$VAL" ]; then
 					case "$i" in
 					  0u*)	Base842toDec 2 "$i"	; VAL=$OUT	;;
 					  0v*)	Base842toDec 4 "$i"	; VAL=$OUT	;;
@@ -569,12 +585,10 @@ DoLines()
 					[ -z "$VAL" ] && VAL=$i	# Assume base 10
 				fi
 
-				ByteSwap $VAL
-				bs=$OUT
-
+				# Outputs (inefficient, I know, calling them all)
 				Base64 $VAL; MsgVal "Base 64:" $OUT 64 0
 				Base32 $VAL; MsgVal "Base 32:" $OUT 32 0
-				Base16 $VAL; MsgVal "Base 16:" $OUT 16 0
+				Base16 $VAL; hd=${#OUT}; MsgVal "Base 16:" $OUT 16 0
 
 				MsgVal "Base 10:" $VAL 10 0
 
@@ -582,9 +596,13 @@ DoLines()
 				Base842 4 $VAL; MsgVal "Base  4:" $OUT 4 0
 				Base842 2 $VAL; MsgVal "Base  2:" $OUT 2 0
 
-				Base64 $bs; MsgVal "Swap 64:" $OUT 64 1
-				Base32 $bs; MsgVal "Swap 32:" $OUT 32 1
-				Base16 $bs; MsgVal "Swap 16:" $OUT 16 1
+				if [ $hd -eq 8 -o $hd -eq 4 ]; then
+					ByteSwap $VAL
+					bs=$OUT
+					Base64 $bs; MsgVal "Swap 64:" $OUT 64 1
+					Base32 $bs; MsgVal "Swap 32:" $OUT 32 1
+					Base16 $bs; MsgVal "Swap 16:" $OUT 16 1
+				fi
 			done
 		fi
 	fi; done
@@ -592,7 +610,10 @@ DoLines()
 
 while [ -n "$1" ]; do
 	case "$1" in
-	  10|16|32|64|8|4|2)	[ -z "$ARGS" ] && FOUT="${FOUT} $1"	|| FIN="$1"	;;
+	  2|4|8|10|16|32|64)
+	  	[ -z "$ARGS" ] && FOUT="$FOUT $1" || FIN="$1"
+	  ;;
+
 	  -d)	DEBUG=$((1 + $DEBUG))			;;
 	  -b)	BYTESWAP=$((1 - $BYTESWAP))		;;
 	  -n)	JUSTVAL=$((1 - $JUSTVAL))		;;
