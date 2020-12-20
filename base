@@ -1,0 +1,613 @@
+#!/bin/sh
+#
+#	Ver	Who	When	What
+#	002	GLK	201220	Fixed Base64 to match Clover
+#	001	GLK	201217	Update to work on Mac - no double arraws in awk, indeterminate "for v in array" order, fix stashing EOS
+#
+gVersion=0.02
+gStamped=201220
+
+# Global
+DEBUG=0			# Noisy?
+FIN=''
+FOUT=''
+ARGS=''
+CHARS=''
+
+# Options
+BYTESWAP=0
+JUSTVAL=0
+DATAMODE=0
+
+# Constants
+RFC464832='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+RFC464864='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+HEX='0123456789abcdef'
+
+
+Usage()
+ {
+	local	b=$(basename "$0")
+
+	Msg '-' "Usage: $b [options] [ OutFormat ] InNumber [ InFormat ]
+
+	Options
+		-b	byteswap (MSB -> LSB) - shown anyway if no output specified
+		-d	Increase verbosity
+		-n	Number only - only one output, no label
+		-s	String operations, not numeric
+
+	Convert between bases. Default Out Format is all of them
+
+	Examples
+		base 16384
+		base 16 16384
+		base -n 16 16384
+		base -s \"The quick brown fox\"
+		base -s VGhlIHF1aWNrIGJyb3duIGZveA==
+		cat fileOfNumbers | base 64
+
+	Version $gVersion from $gStamped
+
+	Public domain, Greg Kerr 2020
+"
+ }
+
+Msg()
+ {
+	local t
+	[ "$1" = '-' ] && shift || ([ -n "$EPOCHSECONDS" ] && t="$EPOCHSECONDS" || t=$(date +%s); t="$((1000 + ($t % 3600))): ")
+	echo "$t$@" >&2
+ }
+
+InfoMsg()
+ {
+	[ $DEBUG -gt 0 ] && Msg "$@"
+ }
+
+DbgMsg()
+ {
+	[ $DEBUG -gt 1 ] && Msg "$@"
+ }
+
+
+###### INPUTS ########
+Base842toDec()
+ {
+	local	c
+	local	i="$2"
+	local	n=0
+
+	DbgMsg "Base8toDec: $i"
+	i="${i#0w}"
+	while [ -n "$i" ]; do
+		c="${i:0:1}"
+		i="${i:1}"
+		n=$(($1 * $n + $c))
+	done
+	OUT=$n	
+ }
+
+Base16toDec()
+ {
+	local	c
+	local	i="$1"
+	local	n=0
+
+	DbgMsg "Base16toDec: $i"
+	i="${i#0x}"
+	[ $BASH_VERSINFO -gt 3 ] && i="${i,,*}" || i=$(echo "$i" | tr '[:upper:]' '[:lower:]')
+	while [ -n "$i" ]; do
+		c="${i:0:1}"
+		i="${i:1}"
+		case "$c" in
+		  f)	c=15	;;
+		  e)	c=14	;;
+		  d)	c=13	;;
+		  c)	c=12	;;
+		  b)	c=11	;;
+		  a)	c=10	;;
+		esac
+		n=$((16 * $n + $c))
+	done
+	OUT=$n	
+ }
+
+Base32toDec()
+ {
+	local	c v
+	local	i="$1"
+	local	n=0
+
+	DbgMsg "Base32toDec: $i"
+	i="${i#0y}"
+	while [ -n "$i" ]; do
+		c="${i:0:1}"
+		i="${i:1}"
+		v=$(LC_CTYPE=C printf '%d' "'$c")
+
+		if [ $v -le 57 ]; then	# 2-7
+			v=$(($v - 50 + 26))
+		elif [ $v -eq 61 ]; then	# =
+			v=-1
+		elif [ $v -le 90 ]; then	# A-Z
+			v=$(($v - 65))
+		else
+			Msg "Base64 illegal: $c"
+		fi
+
+		DbgMsg "B32: $c to $v"
+		[ $v -ge 0 ] && n=$(($n * 32 + $v))
+	done
+
+	OUT=$n
+ }
+
+Base64toDec()
+ {
+	local	c v
+	local	i="$1"
+	local	n=0
+	local	b=0
+
+	DbgMsg "Base64toDec: $i"
+	i="${i#0z}"
+	while [ -n "$i" ]; do
+		c="${i:0:1}"
+		i="${i:1}"
+		case "$c" in
+		  '+')		v=62						;;
+		  '/')		v=63						;;
+		  '=')		# Back out the extra bits
+			v=-1
+			c=$(($b % 8))		# Padded bits in stream
+			DbgMsg "Pad bits: $c"
+			while [ $c -gt 0 ]; do
+				n=$(($n / 2))
+				c=$(($c - 1))
+			done
+			b=0
+		  ;;
+		  [0-9])	v=$(($c - 0 + 52))			;;
+		  [A-Z])	v=$(($(LC_CTYPE=C printf '%d' "'$c") - 65))	;;
+		  [a-z])	v=$(($(LC_CTYPE=C printf '%d' "'$c") - 97 + 26))	;;
+		  *)		Msg "Base64 illegal: $c"	;;
+		esac
+
+		if [ $v -ge 0 ]; then
+			DbgMsg "B64: $c to $v ($n)"
+			n=$(($n * 64 + $v))
+			b=$((6 + $b))
+		fi
+	done
+
+	OUT=$n
+ }
+
+Base64decode()
+ {
+	local	c v d e m
+	local	i="$1"
+	local	n=0
+	local	b=0
+	local	s=''
+
+	DbgMsg "Base64toDec: $i"
+	i="${i#0z}"
+	while [ -n "$i" ]; do
+		c="${i:0:1}"
+		i="${i:1}"
+		case "$c" in
+		  '+')		v=62						;;
+		  '/')		v=63						;;
+		  '=')		# Back out the extra bits
+			v=-1
+			c=$(($b % 8))		# Padded bits in stream
+			DbgMsg "Pad bits: $c"
+			while [ $c -gt 0 ]; do
+				n=$(($n / 2))
+				c=$(($c - 1))
+			done
+			b=0
+		  ;;
+		  [0-9])	v=$(($c - 0 + 52))			;;
+		  [A-Z])	v=$(($(LC_CTYPE=C printf '%d' "'$c") - 65))	;;
+		  [a-z])	v=$(($(LC_CTYPE=C printf '%d' "'$c") - 97 + 26))	;;
+		  *)		Msg "Base64 illegal: $c"	;;
+		esac
+
+		if [ $v -ge 0 ]; then
+			b=$((6 + $b))
+			n=$(($n * 64 + $v))
+			if [ $b -ge 8 ]; then
+				b=$(($b % 8))
+				d=$b
+				e=$n
+				m=1
+				# Back shift $b bits
+				while  [ $d -gt 0 ]; do
+					d=$(($d - 1))
+					e=$(($e / 2))
+					m=$(($m * 2))
+				done
+				DbgMsg "B64d: $c to $v ($e:$n:$s)"
+				c=$(printf "\\$(printf '%03o' "$e")")
+				s="$s$c"
+				n=$(($n % $m))
+			fi
+		fi
+	done
+
+	OUT=$s
+ }
+
+####### OUTPUTS #########
+Base64()
+ {
+	local	s b e R
+	local	r=0		# Remainder bits value
+	local	d=0		# Remainder bits count
+	local	x=8		# Bits to encode... not used in calc
+	local	h=256	# 2 ^ x
+	local	v=$1
+
+	# How many significant bytes?
+	while [ $v -ge $((256 * $h)) ]; do
+		h=$(($h * 256))
+		x=$(($x + 8))
+	done
+
+	DbgMsg "Bits: $x ($h) in $v"
+
+	# For each byte
+	while [ $h -gt 0 ]; do
+		b=$(($v / $h))			# Encode highest byte
+		v=$(($v - ($b * $h)))	# Remove highest byte
+
+		DbgMsg "64e: b:$b (r:$r, d:$d) h:$h : v:$v : $s"
+
+		case $d in				# For 0,2,4 prior remaining bits
+		  0)
+			d=2
+			r=$(($b % 4))		# Remaining 2 bits
+			b=$(($b / 4))		# Highest 6 bits
+		  ;;
+		  2)
+			d=4
+			R=$(($b % 16))
+			b=$((($b / 16) + ($r * 16)))		# 2 remainder bits + highest 4 bits
+			r=$R
+		  ;;
+		  4)
+			d=0
+			e=$((($b / 64) + ($r * 4)))			# 4 remainder bits + highest 2 bits
+			s=$s${RFC464864:$e:1}				# Push the encoded 6
+			b=$(($b % 64))						# Lowest 6 bits
+			r=0
+		  ;;
+		esac
+
+		s=$s${RFC464864:$b:1}					# Push digit
+		h=$(($h / 256))							# Next byte
+		x=$(($x - 8))
+	done
+
+	# Remaining bits
+	case $d in
+		2)	s=$s${RFC464864:$(($r * 16)):1}			;;
+		4)	s=$s${RFC464864:$(($r * 4)):1}			;;
+	esac
+
+	b=${#s}
+	b=$(( (($b / 4) + 1) * 4 ))
+
+	while [ ${#s} -lt $b ]; do
+		s="$s="
+	done
+
+	[ -z "$s" ] && s='='
+	OUT=$s
+ }
+
+Base64encode()
+ {
+	local	s b e R c
+	local	r=0		# Remainder bits value
+	local	d=0		# Remainder bits count
+	local	x=8		# Bits to encode... not used in calc
+	local	h=256	# 2 ^ x
+	local	v="$1"
+
+	# For each byte
+	while [ -n "$v" ]; do
+		c="${v:0:1}"
+		v="${v:1}"
+		b=$(LC_CTYPE=C printf '%d' "'$c")
+
+		case $d in				# For 0,2,4 prior remaining bits
+		  0)
+			d=2
+			r=$(($b % 4))		# Remaining 2 bits
+			b=$(($b / 4))		# Highest 6 bits
+		  ;;
+		  2)
+			d=4
+			R=$(($b % 16))
+			b=$((($b / 16) + ($r * 16)))		# 2 remainder bits + highest 4 bits
+			r=$R
+		  ;;
+		  4)
+			d=0
+			e=$((($b / 64) + ($r * 4)))			# 4 remainder bits + highest 2 bits
+			s=$s${RFC464864:$e:1}				# Push the encoded 6
+			b=$(($b % 64))						# Lowest 6 bits
+			r=0
+		  ;;
+		esac
+
+		s=$s${RFC464864:$b:1}					# Push digit
+		h=$(($h / 256))							# Next byte
+		x=$(($x - 8))
+	done
+
+	# Remaining bits
+	case $d in
+		2)	s=$s${RFC464864:$(($r * 16)):1}			;;
+		4)	s=$s${RFC464864:$(($r * 4)):1}			;;
+	esac
+
+	b=${#s}
+	b=$(( (($b / 4) + 1) * 4 ))
+
+	while [ ${#s} -lt $b ]; do
+		s="$s="
+	done
+
+	[ -z "$s" ] && s='='
+	OUT=$s
+ }
+
+Base32()
+ {
+	local	s b
+	local	v=$1
+
+	while [ $v -gt 0 ]; do
+		b=$(( $v - (($v / 32) * 32) ))
+		v=$(($v / 32))
+		s=${RFC464832:$b:1}$s
+	done
+
+	b=${#s}
+	b=$(( (($b / 4) + 1) * 4 ))
+
+	while [ ${#s} -lt $b ]; do
+		s="$s="
+	done
+
+	[ -z "$s" ] && s=0	
+	OUT=$s
+ }
+
+
+Base64t()
+ {
+	local	s b
+	local	v=$1
+
+	while [ $v -gt 0 ]; do
+		b=$(( $v - (($v / 64) * 64) ))
+		v=$(($v / 64))
+		s=${RFC464864:$b:1}$s
+	done
+
+	b=${#s}
+	b=$(( (($b / 4) + 1) * 4 ))
+
+	while [ ${#s} -lt $b ]; do
+		s="$s="
+	done
+
+	[ -z "$s" ] && s=0	
+	OUT=$s
+ }
+
+Base32t()
+ {
+	local	s b
+	local	v=$1
+
+	while [ $v -gt 0 ]; do
+		b=$(( $v - (($v / 32) * 32) ))
+		v=$(($v / 32))
+		s=${RFC464832:$b:1}$s
+	done
+
+	b=${#s}
+	b=$(( (($b / 4) + 1) * 4 ))
+
+	while [ ${#s} -lt $b ]; do
+		s="$s="
+	done
+
+	[ -z "$s" ] && s=0	
+	OUT=$s
+ }
+
+
+Base16()
+ {
+	local	s b
+	local	v=$1
+
+	while [ $v -gt 0 ]; do
+		b=$(( $v - (($v / 16) * 16) ))
+		v=$(($v / 16))
+		s=${HEX:$b:1}$s
+	done
+
+	b=${#s}
+	if [ $b -le 2 ]; then
+		b=2
+	elif [ $b -le 4 ]; then
+		b=4
+	elif [ $b -le 8 ]; then
+		b=8
+	else
+		b=$(( (($b / 8) + 1) * 8 ))
+	fi
+
+	while [ ${#s} -lt $b ]; do
+		s=0$s
+	done
+
+	[ -z "$s" ] && s=0	
+	OUT=$s
+ }
+
+
+Base842()
+ {
+	local	s b
+	local	v=$2
+
+	while [ $v -gt 0 ]; do
+		b=$(( $v - (($v / $1) * $1) ))
+		v=$(($v / $1))
+		s=$b$s
+	done
+
+	[ -z "$s" ] && s=0	
+
+	b=${#s}
+	if [ $b -le 2 ]; then
+		b=2
+	elif [ $b -le 4 ]; then
+		b=4
+	elif [ $b -le 8 ]; then
+		b=8
+	else
+		b=$(( (($b / 8) + 1) * 8 ))
+	fi
+
+	while [ ${#s} -lt $b ]; do
+		s=0$s
+	done
+
+	OUT=$s
+ }
+
+
+ByteSwap()
+ {
+	local	h l hh hl lh ll
+	local	v=$1
+
+	l=$(($v / 65536))
+	h=$(($v - ($l * 65536)))
+	hl=$(($h / 256))
+	hh=$(($h - ($hl * 256)))
+	ll=$(($l / 256))
+	lh=$(($l - ($ll * 256)))
+	OUT=$(( ((($hh * 256) + $hl) * 65536) + ($lh * 256) + $ll ))
+ }
+
+MsgVal()
+ {
+	local	f
+	local	lbl="$1"
+	local	v=$2
+	local	b=$3
+	local	bs=$4
+
+	if [ -n "$FOUT" ]; then
+		[ $bs -ne $BYTESWAP ] && return 0
+		for f in $FOUT; do [ $f -eq $b ] && b=0; done
+		[ $b -ne 0 ] && return 0
+	fi
+		
+	[ $JUSTVAL -eq 0 ] && Msg "$lbl $v" || Msg $v
+ }
+
+DoLines()
+ {
+	local	line i j bs
+
+	while read line; do if [ -n "$line" ]; then
+		if [ $DATAMODE -ne 0 ]; then
+			case "$line" in
+			  *\=)	Base64decode "$line";	Msg "String : $OUT"	;;
+			  *)	Base64encode "$line";	Msg "Base 64: $OUT"	;;
+			esac
+		else
+			for i in $line; do
+				VAL=''
+
+				case "$FIN" in
+				  64)	Base64toDec $i	; VAL=$OUT	;;
+				  32)	Base32toDec $i	; VAL=$OUT	;;
+				  16)	Base16toDec $i	; VAL=$OUT	;;
+				  8)	Base842 8 $i	; VAL=$OUT	;;
+				  4)	Base842 4 $i	; VAL=$OUT	;;
+				  2)	Base842 2 $i	; VAL=$OUT	;;
+				  10)	VAL=$i
+				esac
+
+				if [ -z "$VAL" ]; then	# Unspecified in args, suss it out
+					case "$i" in
+					  0u*)	Base842toDec 2 "$i"	; VAL=$OUT	;;
+					  0v*)	Base842toDec 4 "$i"	; VAL=$OUT	;;
+					  0w*)	Base842toDec 8 "$i"	; VAL=$OUT	;;
+					  0x*)	Base16toDec "$i"	; VAL=$OUT	;;
+					  0y*)	Base32toDec "$i"	; VAL=$OUT	;;
+					  0z*)	Base64toDec "$i"	; VAL=$OUT	;;
+
+					  *[G-Z,g-z]*|*\=)	Base64toDec "$i"	; VAL=$OUT	;;
+					  *[A-F,a-f]*)		Base16toDec "$i"	; VAL=$OUT	;;
+					esac
+
+					[ -z "$VAL" ] && VAL=$i	# Assume base 10
+				fi
+
+				ByteSwap $VAL
+				bs=$OUT
+
+				Base64 $VAL; MsgVal "Base 64:" $OUT 64 0
+				Base32 $VAL; MsgVal "Base 32:" $OUT 32 0
+				Base16 $VAL; MsgVal "Base 16:" $OUT 16 0
+
+				MsgVal "Base 10:" $VAL 10 0
+
+				Base842 8 $VAL; MsgVal "Base  8:" $OUT 8 0
+				Base842 4 $VAL; MsgVal "Base  4:" $OUT 4 0
+				Base842 2 $VAL; MsgVal "Base  2:" $OUT 2 0
+
+				Base64 $bs; MsgVal "Swap 64:" $OUT 64 1
+				Base32 $bs; MsgVal "Swap 32:" $OUT 32 1
+				Base16 $bs; MsgVal "Swap 16:" $OUT 16 1
+			done
+		fi
+	fi; done
+ }
+
+while [ -n "$1" ]; do
+	case "$1" in
+	  10|16|32|64|8|4|2)	[ -z "$ARGS" ] && FOUT="${FOUT} $1"	|| FIN="$1"	;;
+	  -d)	DEBUG=$((1 + $DEBUG))			;;
+	  -b)	BYTESWAP=$((1 - $BYTESWAP))		;;
+	  -n)	JUSTVAL=$((1 - $JUSTVAL))		;;
+	  -s)	DATAMODE=1						;;
+	  -*)	Msg "Unknown option: $1"		;;
+	  *)	ARGS="$ARGS
+$1"											;;
+	esac
+	shift
+done
+
+if [ -n "$ARGS" ]; then
+	echo "$ARGS" | DoLines
+elif [ -t 0 ]; then
+	Usage
+else
+	DoLines
+fi
