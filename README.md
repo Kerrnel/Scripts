@@ -25,3 +25,24 @@ Usage: xmlparse [-b][-c][-d][-f][-h][-k][-m path][-n #][-q][-s suffix][-t][-?] [
         Reddit RSS images with URLs: xmlparse -n 1 -m '/entry/content/a.href' -s '.jpg' -q 'https://reddit.com/r/cityporn/rising/.rss'
 
         Version 0.06 from 201124
+
+
+Usage: base [options] [ OutFormat ] InNumber [ InFormat ]
+
+        Options
+                -b      byteswap (MSB -> LSB) - shown anyway if no output specified
+                -d      Increase verbosity
+                -n      Number only - only one output, no label
+                -s      String operations, not numeric
+
+        Convert between bases. Default Out Format is all of them
+
+        Examples
+                base 16384
+                base 16 16384
+                base -n 16 16384
+                base -s "The quick brown fox"
+                base -s VGhlIHF1aWNrIGJyb3duIGZveA==
+                cat fileOfNumbers | base 64
+
+        Version 0.02 from 201220
