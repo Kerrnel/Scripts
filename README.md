@@ -50,7 +50,7 @@ Usage: base [options] [ OutFormat ] InNumber [ InFormat ]
                 base 0v10000000                 # base4
                 base 0w40000                    # octal
                 base 0x4000                     # hex
-                base 0yQAA                      # base32
+                base 0yIAAA                     # base32
                 base 0zQAA                      # base64
                 base -n 16 16384
                 base -s "The quick brown fox"
