@@ -29,20 +29,30 @@ Usage: xmlparse [-b][-c][-d][-f][-h][-k][-m path][-n #][-q][-s suffix][-t][-?] [
 
 Usage: base [options] [ OutFormat ] InNumber [ InFormat ]
 
+        Smartly convert between bases. Default Out Format is all of them
+
         Options
                 -b      byteswap (MSB -> LSB) - shown anyway if no output specified
-                -d      Increase verbosity
+                -d      Force decode (needed for multiline base64 string)
+                -e      Force encode
                 -n      Number only - only one output, no label
                 -s      String operations, not numeric
-
-        Convert between bases. Default Out Format is all of them
+                -v      Increase verbosity
 
         Examples
                 base 16384
                 base 16 16384
+                base 4000 16
+                base QAA 64
+                base 0u0u100000000000000        # binary
+                base 0v10000000                 # base4
+                base 0w40000                    # octal
+                base 0x4000                     # hex
+                base 0yQAA                      # base32
+                base 0zQAA                      # base64
                 base -n 16 16384
                 base -s "The quick brown fox"
                 base -s VGhlIHF1aWNrIGJyb3duIGZveA==
                 cat fileOfNumbers | base 64
 
-        Version 0.02 from 201220
+        Version 0.05 from 201222
