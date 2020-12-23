@@ -37,9 +37,11 @@ Usage: base [options] [ OutFormat ] InNumber [ InFormat ]
                 -b      byteswap (MSB -> LSB) - shown anyway if no output specified
                 -d      Force decode (needed for multiline base64 string)
                 -e      Force encode
+                -l      Same as -w 32
                 -n      Number only - only one output, no label
                 -s      String operations, not numeric
                 -v      Increase verbosity
+                -w      Width in bits
 
         Examples
                 base 16384
@@ -57,4 +59,4 @@ Usage: base [options] [ OutFormat ] InNumber [ InFormat ]
                 base -s VGhlIHF1aWNrIGJyb3duIGZveA==
                 cat fileOfNumbers | base 64
 
-        Version 0.05 from 201222
+        Version 0.07 from 201223
