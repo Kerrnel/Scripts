@@ -1,0 +1,47 @@
+#!/bin/sh
+DEBUG=0
+
+PLUTIL=$(which 'plutil' 2>/dev/null)
+
+Msg()
+ {
+	local t
+	[ "$1" = '-' ] && shift || ([ -n "$EPOCHSECONDS" ] && t="$EPOCHSECONDS" || t=$(date +%s); t="$((1000 + ($t % 3600))): ")
+	echo "$t$@" >&2
+ }
+
+Usage()
+ {
+	Msg '-' "Usage: $0 kextDirOrPlist [kextDirOrPlist...]" 
+ }
+
+PLDump()
+ {
+	[ -n "$PLUTIL" ] && plutil -convert xml1 -o - "$1" || cat "$1"
+ }
+
+DoIt()
+ {
+	local i f d t
+	for i in "$@"; do
+		[ -d "$i" ] && f="$i/Contents/Info.plist" || f="$i"
+		if [ -e "$f" ]; then
+			[ $DEBUG -gt 0 ] && Msg "Doing: $f"
+			[ $DEBUG -gt 1 ] && plutil -convert xml1 -o '/tmp/test.plist' "$f"
+			d=$(dirname "$f")
+			d=$(dirname "$d")
+			d=$(basename "$d")
+			t=$((39 - ${#d}))
+			printf "${d}:	"
+			while [ $t -gt 0 ]; do
+				printf "	"
+				t=$(($t - 8))
+			done
+			PLDump "$f" | xmlparse -m /plist/%/CFBundleShortVersionString -q -f
+		else
+			Msg "* No plist: $i"
+		fi
+	done
+ }
+
+[ -z "$1" ] && Usage || DoIt "$@"
