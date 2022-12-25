@@ -1,0 +1,156 @@
+#!/bin/bash
+# Need bash for substrings
+
+#
+# Set Refind's previous booted item variable (for next boot if it is set to boot previous)
+#
+
+#	Usage
+#	$0 [ChoiceOfBoot] [Volume for Choice]
+
+#	History
+#	001	GLK	221211	Support volume and Boot X from Y format of the variable that seems to be in use
+#
+
+REFINDPATH='/boot/efi/EFI/Refind'
+EFIGUID='36d08fa7-cf0b-42f5-8f14-68df73ed3740'
+EFIVAR="${EFIGUID}-PreviousBoot"
+EFIPATH="/sys/firmware/efi/efivars/PreviousBoot-${EFIGUID}"
+EFITMP='/tmp/refind.efivar'
+EFIBAK='/tmp/refound.efivar'
+LOG='/tmp/rnb.log'
+
+Error()
+ {
+	# Show error, quit
+	Log '***'
+	Log "*** $@"
+	Log '***'
+	exit 1
+ }
+
+Log()
+ {
+	# Show & log a message
+	echo "$@" | while read line; do
+		echo "	$(date +%y%m%d.%H:%M:%S)  $line" | tee -a "$LOG" >&2
+	done
+ }
+
+IsIn()
+ {
+	local line
+	while read line; do
+		[ "$line" = "$1" ] && return 0
+	done
+	return 1
+ }
+
+VolForEntry()
+ {
+	local	line menu
+	while read line; do
+		line="${line%%#*}"
+		case "$line" in
+		  [Mm][Ee][Nn][Uu][Ee][Nn][Tt][Rr][Yy]*)
+			line="${line#* }"
+			line="${line% \{*}"
+			line="${line%\{*}"
+			if [ "$line" != "$line#*\"" ]; then	# Quoted
+				line="${line#*\"}"
+				line="${line%\"*}"
+			fi
+			while [ "$line" != "${line% }" ]; do line="${line% }"; done
+			while [ "$line" != "${line# }" ]; do line="${line# }"; done
+		  	menu="${line}"
+		  ;;
+		  *[Vv][Oo][Ll][Uu][Mm][Ee]*)
+			line="${line#*[Vv][Oo][Ll][Uu][Mm][Ee]}"
+			if [ "$line" != "$line#*\"" ]; then	# Quoted
+				line="${line#*\"}"
+				line="${line%\"*}"
+			fi
+			# echo "${menu}:${line}"
+			while [ "$line" != "${line% }" ]; do line="${line% }"; done
+			while [ "$line" != "${line# }" ]; do line="${line# }"; done
+			[ "$menu" = "$1" ] && echo "$line" && menu=''
+		  ;;
+		esac
+	done
+ }
+
+VolFor()
+ {
+	local line
+	while read line; do
+		cat "$line" | VolForEntry "$1"
+	done
+ }
+
+VolForChoice()
+ {
+	grep -l -i "^MenuEntry.*$1" "$REFINDPATH"/*.conf | VolFor "$1" | head -n 1
+ }
+
+[ -e "$EFIPATH" ] || Error "No $EFIPATH entry exists"
+efivar -n "$EFIVAR"
+
+[ -z "$1" ] && Log "Choose from:"
+
+list=$(grep -i '^MenuEntry' "$REFINDPATH"/*.conf | sed -e 's/^[^ ]*[ ]//' | sed -e 's/ {.*//' | while read line; do
+	if [ "$line" != "$line#*\"" ]; then	# Quoted
+		line="${line#*\"}"
+		echo "[${line%\"*}]"
+	else
+		echo "[$line]"
+	fi
+done)
+
+# Log "$list"
+echo "$list" | while read line; do
+	line="${line#[}"
+	line="${line%]}"
+	vol=$(VolForChoice "$line")
+	[ -n "$vol" ] && Log "[$line] : [from $vol]" || Log "[$line]"
+done
+
+choice="$1"
+vol="$2"
+if [ -n "$choice" ]; then
+	echo "$list" | IsIn "[$1]"
+	err=$?
+	[ $err -eq 0 ] && Log "Found $choice as a menu entry" || Log "Using $choice as a partial match"
+
+	[ -z "$vol" ] && vol=$(VolForChoice "$choice")
+	choice="Boot ${choice}"	# Seems to be what Refind stores
+	[ -n "$vol" ] && choice="${choice} from ${vol}"
+
+	Log "Copying $EFIPATH to $EFIBAK"
+	cp "$EFIPATH" "$EFIBAK"
+
+	# Create new var - presume it starts with 07 00 00 00 'Boot ' (4 + 10)
+	dd bs=1 if="$EFIBAK" of="$EFITMP" count=4 2>/dev/null
+	n=4
+
+	rm "$EFITMP"; touch "$EFITMP"
+	n=0
+
+	s=0
+	while [ $s -lt ${#choice} ]; do
+		# Log "Get character #$s from $choice"
+		echo "${choice:$s:1}" >> "$EFITMP"
+		n=$((1 + $n))
+		s=$((1 + $s))
+		# Write a 0 to make UTF-16 out of ASCII
+		dd bs=1 if="$EFIBAK" of="$EFITMP" skip=1 seek=$n count=1  2>/dev/null
+		n=$((1 + $n))
+	done
+
+	dd bs=1 if="$EFIBAK" of="$EFITMP" skip=1 seek=$n count=2  2>/dev/null
+	n=$((2 + $n))
+
+	Log "Created $EFITMP with length $n, writing back"
+	# dd bs=1 if="$EFITMP" of="$EFIPATH" 2>/dev/null - fails
+	sudo efivar -f "$EFITMP" -n "$EFIVAR" -w
+	efivar -n "$EFIVAR"
+fi

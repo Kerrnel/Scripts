@@ -226,7 +226,6 @@ PrintLine()
 	[ $SINGLET -ne 0 -a "$PRIOR" = 'key' ] && val="~$TAG"
 	[ -n "$val" -o $IGNOREBLANK -eq 0 -o "$PRIOR" = 'key' ] && PrintField "$tag" "$val"
 
-	[ $ONLYFIRST -eq 1 -a -n "$MATCH$SUFFIX" ] && exit 0 || ONLYFIRST=$(($ONLYFIRST - 1))
 	return 0
  }
 
@@ -398,6 +397,8 @@ PrintField()
 			for ((l=$DEPTH; l>0; l--)); do printf "\t"; done
 			echo "<$tag>${l}</$tag>"
 		fi
+
+		[ $ONLYFIRST -eq 1 -a -n "$MATCH$SUFFIX" ] && exit 0 || ONLYFIRST=$(($ONLYFIRST - 1))
 	fi
  }
 
@@ -557,7 +558,7 @@ Usage()
 	or - cat file.xml | $b ...
 
 	Examples
-	Version of kext: plutil -convert xml1 -o - AppleALC.kext/Contents/Info.plist | xmlparse -m /plist/%/CFBundleShortVersionString -q -f
+	Version of kext: plutil -convert xml1 -o - AppleALC.kext/Contents/Info.plist | xmlparse -m :CFBundleShortVersionString -q -f
 	Reddit RSS images with URLs: xmlparse -n 1 -m '/entry/content/a.href' -s '.jpg' -q 'https://reddit.com/r/cityporn/rising/.rss'
 
 	Issues
