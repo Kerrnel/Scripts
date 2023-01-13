@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 #	Ver	Who	When	What
-#	003	GLK	210110	Tested with xmlparse to match original output. Passed in at least Igloo case
+#	003	GLK	210110	Tested with xmlp to match original output. Passed in at least Igloo case
 #	002	GLK	201217	Update to work on Mac - no double arraws in awk, indeterminate "for v in array" order, fix stashing EOS
 #
 gVersion=0.02
@@ -49,7 +49,7 @@ Usage()
 
 DoXML()
  {
-	awk -v "DEBUG=$DEBUG" '
+	sed -e 's/></>\n</g' | awk -v "DEBUG=$DEBUG" '
 function PrintKeys()
  {
 	Msg(0, "PrintKeys: " keyi " : " skip)

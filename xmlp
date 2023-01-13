@@ -1,12 +1,13 @@
 #!/bin/bash
-gVersion=0.09
-gStamped=221224
+gVersion=0.10
+gStamped=230113
 #
-#	xmlparse (c) 2020 Akua Corp
+#	xmlp (c) 2020-23 Akua Corp
 #
 #	License: Public Domain
 #
 #	History
+#	010	GLK	230113	Document -a option, handle comments (multi-line values still a propblem)
 #	009	GLK	221224	Forget when I made last change, but root=feed coming out on top of search for jpgs in rss
 #	008	GLK	210207	Start to create new compact format with tabs instead of . and array/dict first item on next line
 #	007	GLK	201213	Support -e for current behaviour, compress paths with . matching parent component
@@ -41,7 +42,7 @@ IGNOREBLANK=1	# Don't dump empty items
 IGNOREXML=0		# Handle HTML?
 ONLYFIRST=0		# Return after finding first match
 FLATKEY=1		# Turn dict <key>A</key><string>s</string> into path/A/string/s
-ARRAYIDX=1		# Turn /array/ into /#idx/ where idx increments each array item
+ARRAYNUMS=1		# Turn # for array items into #idx where idx increments each array item
 MATCH=''		# Only print matching path
 SUFFIX=''		# Only print if value has this suffix
 NEXTS=0			# Number of MATCH lines to print after SUFFIX is hit (e.g. to include following html line after jpg matches)
@@ -49,6 +50,7 @@ NEXTC=0			# This is set to NEXTS when SUFFIX matches
 ONLYVALUE=0		# No tag path: prefix
 EXPAND=0		# Expanded full paths per line vs . per matching component
 OUTXML=0		# Output XML again (after edits presumably)
+MULTILINE=0		# Convert new line to ;; in values
 
 # Global current tag in process
 ROOTELEM=''	# ROOTELEM - first element after <?xml
@@ -111,7 +113,7 @@ ReadTag()
 
 ReadXmlTag()
  {
-
+	local	aIdx
 	local	pTag="${CWP##*/}"
 	local	pDic="${pTag#*:}"
 	local	del='/'
@@ -154,11 +156,23 @@ ReadXmlTag()
 					case "$pDic" in
 					  'array')
 						ARRAYIDX=1
-						CWP="${CWP%/*}/#1"
+						if [ $ARRAYNUMS -eq 0 ]; then
+							aIdx=''
+							# PrintTag "${CWP}" '-'
+						else
+							aIdx="$ARRAYIDX"
+						fi
+						CWP="${CWP%/*}/#$aIdx"
 					  ;;
 					  '#'[0-9]*)
 						ARRAYIDX=$((1 + $ARRAYIDX))
-						CWP="${CWP%/*}/#${ARRAYIDX}"
+						if [ $ARRAYNUMS -eq 0 ]; then
+							aIdx=''
+							# PrintTag "${CWP}" '-'
+						else
+							aIdx="$ARRAYIDX"
+						fi
+						CWP="${CWP%/*}/#$aIdx"
 					  ;;
 					esac
 				 ;;
@@ -252,6 +266,17 @@ PrintProps()
  }
 
 
+MultiLine()
+ {
+	local	l line
+	local	lb=';;'
+	while read l; do
+		line="${line}${lb}$l"
+	done
+	echo "${line#$lb}"
+ }
+
+
 PrintTag()
  {
 	# Print $1 tag's properties if any in $@
@@ -263,7 +288,14 @@ PrintTag()
 
 	if [ $OUTXML -eq 0 ]; then
 		DbgMsg "TAG: [$tag] [$PROP] $IGNOREBLANK [$PRIOR]"
-		eval PrintProps \"$tag\" "$PROP"	# Need to get props as "$@" - for i in $PROP fails to break words properly
+		if [ "$TAG" = '--' ]; then
+			PROP=$(echo "$PROP" | MultiLine)
+			PrintLine "--" "$PROP"
+		else
+			[ $MULTILINE -ne 0 ] && PROP=$(echo "$PROP" | MultiLine)
+			PrintProps "$tag" $PROP		# Need to get props as "$@" - for i in $PROP fails to break words properly
+		fi
+		[ $MULTILINE -ne 0 ] && PROP=$(echo "$CONTENT" | MultiLine)
 		PrintLine "$tag" "$CONTENT"
 	else
 		# Untested and makes no sense
@@ -305,7 +337,7 @@ CompressTag()
 
 	a="${LASTWP#[:/]}";	LASTWP="$t"
 	d="${t:0:1}"
-	t="${t#[/:]}";			[ "$t" = "$LASTWP" ] && return 0	# No /
+	t="${t#[/:]}";		[ "$t" = "$LASTWP" ] && return 0	# No /
 	n=0
 
 	a="${a%[:/]*}"							# Drop last leaf - need to keep something even if the same
@@ -386,7 +418,7 @@ PrintField()
 			fi
 		fi
 
-		# Compress some tag path items - e.g. dict/key to %
+		# Compress some tag path items - e.g. dict/key to :
 		if [ $OUTXML -eq 0 ]; then
 			if [ $EXPAND -eq 0 ]; then
 				CompressTag "$tag"
@@ -539,8 +571,9 @@ Usage()
  {
 	local	b=$(basename "$0")
 
-	Msg '-' "Usage: $b [-b][-c][-d][-f][-h][-k][-m path][-n #][-q][-s suffix][-t][-?] [URL or File or use stdin if nothing]
+	Msg '-' "Usage: $b [-a][-b][-c][-d][-f][-h][-k][-l][-m path][-n #][-q][-s suffix][-t][-?] [URL or File or use stdin if nothing]
 
+	-a	Array item numbers blank (useful when searching for any array item)
 	-b	Ignore blank lines toggle (default ON)
 	-c	Increase rawness content fields (parsed as XML -> HTML -> raw)
 	-d	Increase verbosity
@@ -548,6 +581,7 @@ Usage()
 	-f	Stop parsing after nth match (see -m) per stream. Can specify multiple for multiple matches.
 	-h	Ignore search for ?xml tag to start (e.g. parse HTML)
 	-k	Toggle flatten key tag into path - key/val couplets as path/key/name/type:value
+	-l	Line break conversion to ;; for values
 	-m	Match - only output if /path matches given path (at head)
 	-n	Next n fields after match included (-s applies)
 	-q	Do not prefix each line with /path: - just value
@@ -573,7 +607,7 @@ URL=''
 
 while [ -n "$1" ]; do
 	case "$1" in
-	  '-a')	ARRAYIDX=$((1 - $ARRAYIDX))			;;	# Toggle flatten keys in dicts
+	  '-a')	ARRAYNUMS=$((1 - $ARRAYNUMS))		;;	# Toggle showing array item numbers
 	  '-b') IGNOREBLANK=$((1 - $IGNOREBLANK))	;;
 	  '-c') RAWCONTENT=$((1 + $RAWCONTENT))		;;	# Rawness of HTML ouput (parsed, HTML, raw)
 	  '-d')	DEBUG=$((1 + $DEBUG))				;;
@@ -581,6 +615,7 @@ while [ -n "$1" ]; do
 	  '-f')	ONLYFIRST=$((1 + $ONLYFIRST))		;;	# Return after finding first MATCH (-m)
 	  '-h')	IGNOREXML=$((1 - $IGNOREXML))		;;	# Allow HTML?
 	  '-k')	FLATKEY=$((1 - $FLATKEY))			;;	# Toggle flatten keys in dicts
+	  '-l')	MULTILINE=$((1 - $MULTILINE))		;;	# Toggle flatten multilines with LF -> ;; conversion
 	  '-m')	MATCH="$2"; shift					;;
 	  '-n')	NEXTS="$2"; shift					;;	# Include n lines after SUFFIX is hit
 	  '-q') ONLYVALUE=$((1 - $ONLYVALUE))		;;	# No path prefix
