@@ -4,29 +4,39 @@ Short form poetry
 Generally FreeBSD/NetBSD/Darwin/Linux tested
 
 
-Usage: xmlparse [-b][-c][-d][-f][-h][-k][-m path][-n #][-q][-s suffix][-t][-?] [URL or File or use stdin if nothing]
+Usage: xmlp [-a][-b][-c][-d][-f][-h][-i][-k][-K c][-l][-m path][-n #][-q][-s suffix][-t][-?] [URL or pathToFile, will use stdin if available]
 
+        -a      Array item numbers blank (useful when searching for any array item)
         -b      Ignore blank lines toggle (default ON)
         -c      Increase rawness content fields (parsed as XML -> HTML -> raw)
         -d      Increase verbosity
         -e      Expand full paths (vs compressed . for each matching component to parent
         -f      Stop parsing after nth match (see -m) per stream. Can specify multiple for multiple matches.
         -h      Ignore search for ?xml tag to start (e.g. parse HTML)
+        -i      Disable auto indexer (array detector)
         -k      Toggle flatten key tag into path - key/val couplets as path/key/name/type:value
-        -m      Match - only output if /path matches given path (at head)
-        -n      Next n fields after match included (-s applies)
+        -K      Set dict/key compression character (default %)
+        -l      Line break conversion to ;; for values (happens for comments by default)
+        -L      Change ;; to this for newline replacement
+        -m pth  Match - only output if /path matches given path (at head)
+        -n cnt  Next n fields after match included (-s applies)
         -q      Do not prefix each line with /path: - just value
-        -s      Suffix match - match backside (e.g. .jpg)
+        -Q c    Quote character before and after values
+        -s sfx  Suffix match - match backside (e.g. .jpg)
         -t      Ignore content layout tags like tables, divs, spans
+        -V      Outpot in bash executable KV format (a=b where a legal variable name and b quoted value)
         -x      Output XML ... work in progress
 
-        or - cat file.xml | xmlparse ...
+        or - cat file.xml | xmlp ...
 
         Examples
-        Version of kext: plutil -convert xml1 -o - AppleALC.kext/Contents/Info.plist | xmlparse -m /plist/%/CFBundleShortVersionString -q -f
-        Reddit RSS images with URLs: xmlparse -n 1 -m '/entry/content/a.href' -s '.jpg' -q 'https://reddit.com/r/cityporn/rising/.rss'
+        Version of macOS thing: xmlp -m %CFBundleShortVersionString -q -f /System/Applications/Mail.app/Contents/Info.plist
+        Reddit RSS images with URLs: xmlp -n 1 -m '/entry/content/a.href' -s '.jpg' -q 'https://reddit.com/r/cityporn/rising/.rss'
+        Use StdIn: cat /path/to/xmlfile.xml | xmlp
 
-        Version 0.07 from 201213
+        Issues: Wider range of XML file testing, more intelligent choices
+
+        Version 0.14 from 230311
 
 
 Usage: base [options] [ OutFormat ] InNumber [ InFormat ]
@@ -59,4 +69,4 @@ Usage: base [options] [ OutFormat ] InNumber [ InFormat ]
                 base -s VGhlIHF1aWNrIGJyb3duIGZveA==
                 cat fileOfNumbers | base 64
 
-        Version 0.07 from 201223
+        Version 0.09 from 210413
