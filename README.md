@@ -4,10 +4,11 @@ Short form poetry
 Generally FreeBSD/NetBSD/Darwin/Linux tested
 
 
-Usage: xmlp [-a][-b][-c][-d][-f][-h][-i][-k][-K c][-l][-m path][-n #][-q][-s suffix][-t][-?] [URL or pathToFile, will use stdin if available]
+Usage: xmlp [-a][-b][-C][-c][-d][-f][-h][-i][-k][-K c][-l][-m path][-n #][-Q c][-q][-s suffix][-t][-V][-x][-?] [URL or pathToFile, will use stdin if available]
 
         -a      Array item numbers blank (useful when searching for any array item)
         -b      Ignore blank lines toggle (default ON)
+        -C      Output CSV format
         -c      Increase rawness content fields (parsed as XML -> HTML -> raw)
         -d      Increase verbosity
         -e      Expand full paths (vs compressed . for each matching component to parent
@@ -33,6 +34,7 @@ Usage: xmlp [-a][-b][-c][-d][-f][-h][-i][-k][-K c][-l][-m path][-n #][-q][-s suf
         Version of macOS thing: xmlp -m %CFBundleShortVersionString -q -f /System/Applications/Mail.app/Contents/Info.plist
         Reddit RSS images with URLs: xmlp -n 1 -m '/entry/content/a.href' -s '.jpg' -q 'https://reddit.com/r/cityporn/rising/.rss'
         Use StdIn: cat /path/to/xmlfile.xml | xmlp
+        CVS Output: xmlp -C https://www.w3schools.com/xml/plant_catalog.xml
 
         Issues: Wider range of XML file testing, more intelligent choices
 
