@@ -1,6 +1,12 @@
 #!/bin/sh
 
 #	History
+#	015	GLK	231110	Minor cleanup
+#	014	GLK	231017	Support mask in IPcmp (8 bit chunks) in hex or decimal format
+#	013	GLK	231015	Handle bridged devices (seeing 'master' in ip show addr output)
+#	012	GLK	230804	Goodbye Jump. 169.254 should not be the main IP
+#	011	GLK	230627	Missing virbr0 from virtual names
+#	010	GLK	230530	Use loop type instead of 127.x for loopback IP check, aliases in IFxxIPA if more than one
 #	009	GLK	230108	Support bridge members in MEM
 #	008	GLK	221114	Recognize vmbrX for Proxmox
 #	007	GLK	221011	Fib: on FreeBSD
@@ -14,19 +20,14 @@
 
 IfProbe()
  {
-	local	a b c d e f rest dName dAddr dMask dAddr6 dPrefx dMacA cmd
+	(which 'ip' >/dev/null 2>&1 && ip addr show || ifconfig -a) | awk -v gOS="$(uname -s)" '
 
-	cmd=$(which 'ip' 2>/dev/null)
-	[ -n "$cmd" ] && cmd="$cmd addr show" || cmd='ifconfig -a'
-
-#	echo "Cmd: $cmd" >&2
-
-	$cmd | awk -v gCMD="$cmd" -v gOS="$(uname -s)" '
 		function Empty() {
 			# Empty for each interface (not global for all)
 			dName = ""
 			dAddr = ""
 			dAdIn = 0
+			dAlia = ""
 			dMask = ""
 			dAdd6 = ""
 			dPfx6 = ""
@@ -44,17 +45,26 @@ IfProbe()
 			dAltN = ""
 			dFib = ""
 			dGrp = ""
+			dBdg = ""
 		 }
 
-		function IPcmp(a, b) {
+		function IPcmp(a, b, m, aa, bb) {
 			split(a, aa, ".")
 			split(b, bb, ".")
-			for (i = 0; i < 4; i++)
+			if ("" == m)
+				m = 32
+			else if (substr(m, 1, 2) == "0x")
+			 {
+				m = 4 * (index(substr(m, 3), "0") - 1)	# Bits in mask e.g. 0xfff00000 is 12 (4 * (4 - 1))
+				if (m < 0) m = 32
+			 }
+			for (i = 0; i < 4 && m > 0; i++)
 			 {
 				if (aa[i] < bb[i])
 					return -1
 				else if (bb[i] < aa[i])
 					return 1
+				m = m - 8
 			 }
 			return 0
 		 }
@@ -86,7 +96,7 @@ IfProbe()
 				 {
 					dVip = dVip == "" ? dAddr : dVip " " dAddr
 				 }
-				else if (dAddr !~ /^127./)
+				else if ("loop" != dType && "slave" != dType)
 				 {
 					# 0 undefined, 1 auto internal, 2 internal, <0 public
 					if (dAddr ~ /^192.168.|^172.1[6-9]\.|^172.2[0-9]\.|^172.3[0-1]\.|^10\./)
@@ -95,18 +105,25 @@ IfProbe()
 						dLan = dLan == "" ? dName : dLan " " dName
 						if (dLip == "")
 							dLip = dAddr
-						else if (IPcmp(dAddr, dLip) > 1)
+						else
 						 {
-							dWip = dLip	# Assume DMZ to this IP by convention
-							dLip = dAddr
-						 }
-						else if (dWip == "")
-						 {
-							dAdIn = -1	# Pretend public IP (DMZ)
-							dWip = dAddr
+							c = IPcmp(dAddr, dLip, dMask)
+							
+							if (0 == c)	# Same LAN?
+								dLip = dLip " " dAddr
+							else if (c > 1)
+							 {
+								dWip = dLip	# Assume DMZ to this IP by convention
+								dLip = dAddr
+							 }
+							else if (dWip == "")
+							 {
+								dAdIn = -1	# Pretend public IP (DMZ)
+								dWip = dAddr
+							 }
 						 }
 					 }
-					else if (dAddr ~ /^169.254./)
+					else if (dAddr ~ /^169.254\./)
 					 {
 						dAut = dAut == "" ? dName : dAut " " dName
 						dAip = dAddr
@@ -122,16 +139,17 @@ IfProbe()
 			 }
 
 			if (dAdIn != 0) print "IF" dName "INT=" dAdIn
-			if (dMask != "") print "IF" dName "MK=" dMask
+			if (dMask != "") print "IF" dName "MSK=" dMask
+			if (dAlia != "" && dAlia != dAddr) print "IF" dName "IPA=\"" dAlia "\""
 			if (dAdd6 != "") print "IF" dName "IP6=" dAdd6
 			if (dPfx6 != "") print "IF" dName "PF6=" dPfx6
 			if (dMacA != "") print "IF" dName "MAC=" dMacA
 			if (dType != "") print "IF" dName "TYPE=" dType
 			if (dMedi != "") print "IF" dName "MED=" dMedi
-			if (dMemb != "") print "IF" dName "MEM=" "\"" dMemb "\""
+			if (dMemb != "") print "IF" dName "MEM=\"" dMemb "\""
 			if (dActi != "") print "IF" dName "ACT=" dActi
 			if (dStat != "") print "IF" dName "UP=" dStat
-			if (dFlag != "") print "IF" dName "FLAG=" "\"" dFlag "\""
+			if (dFlag != "") print "IF" dName "FLAG=\"" dFlag "\""
 			if (dMTU != "") print "IF" dName "MTU=" dMTU
 			if (dPID != "") print "IF" dName "PID=" dPID
 			if (dSSID != "") print "IF" dName "SSID=" dSSID
@@ -139,23 +157,31 @@ IfProbe()
 			if (dAltN != "") print "IF" dName "ALT=" dAltN
 			if (dFib != "") print "IF" dName "FIB=" dFib
 			if (dGrp != "") print "IF" dName "GRP=" dGrp
+			if (dBdg != "") print "IF" dName "BDG=" dBdg
 
 			# Switch is a gnu awk extension
-			if (dType == "tunnel")
+			if ("tunnel" == dType)
 				dTun = dTun == "" ? dName : dTun " " dName
-			else if (dType == "loop")		# Localhost
+			else if ("loop" == dType)		# Localhost
 				dLoc = dLoc == "" ? dName : dLoc " " dName
+			else if ("slave" == dType)		# Localhost
+				dSlave = dSlave == "" ? dName : dSlave " " dName
+			else if ("bridge" == dType)
+				dMstr = dMstr == "" ? dName : dMstr " " dName
 			else if (dName ~ /^awdl/ || dName ~ /^llw/)		# Apple Wireless Direct / Low Latency Wireless
 				dOther = dOther == "" ? dName : dOther " " dName
-			else if (dType == "wifi" || (gOS == "Linux" && dName ~ /^w/))	# Can not see a way to identify on Linux other than first character
+			else if ("wifi" == dType || (gOS == "Linux" && dName ~ /^w/))	# Can not see a way to identify on Linux other than first character
 				dWifi = dWifi == "" ? dName : dWifi " " dName
-			else if (dType == "virtual")
+			else if ("virtual" == dType)
 				dVir = dVir == "" ? dName : dVir " " dName
-			else if (dType == "ether")
+			else if ("ether" == dType || "bridge" == dType)
 			 {
 				dEth = dEth == "" ? dName : dEth " " dName
-				++ dECnt
-				dGate = dGate + ac
+				if ("ether" == dType)
+				 {
+					++ dECnt
+					dGate = dGate + ac
+				 }
 				# print "** IN: " dAdIn " : " ac " : " dInt " : " dExt " : " dAddr
 				if (ac > 0)
 				 {
@@ -210,6 +236,8 @@ IfProbe()
 			dEth = ""
 			dAEth = ""
 			dOther = ""
+			dSlave = ""
+			dMstr = ""
 			dActive = ""
 			dRun = ""
 			dLoc = ""
@@ -241,7 +269,8 @@ IfProbe()
 				dName = substr($dName, 1, length($dName) - 1)
 				if (left = index($0, "<"))
 				 {
-					split(substr($0, left + 1, index($0, ">") - left - 1), a, ",")
+					right = index($0, ">")
+					split(substr($0, left + 1, right - left - 1), a, ",")
 					for (f in a)
 					 {
 						dFlag = (dFlag == "") ? a[f] : dFlag " " a[f]
@@ -256,15 +285,28 @@ IfProbe()
 						if ("no" != dActi && ("RUNNING" == a[f] || "LOWER_UP" == a[f]))
 							dActi = "running"
 					 }	
+					# mtu 1500 qdisc pfifo_fast master br0 state UP group default qlen 1000 (example)
+					split(substr($0, right), a, " ")
+					for (f in a)
+					 {
+						if ("mtu" == a[f])
+							dMTU = a[1 + f]
+						else if ("master" == a[f])
+						 {
+							# dBdg = dBdg == "" ? a[f + 1] : dBdg " " a[f + 1]
+							dType = "slave"
+						 }
+					 }
 				 }
 
 				if ((atLoc = index(dName, "@")) > 0)
 					dName = substr(dName, 0, atLoc - 1)
-				if ((gsub("\\.", "_", dName) > 0) || (index(dName, "docker") > 0) || (index(dName, "lxcbr") > 0) || (atLoc > 0))
+				if ((gsub("\\.", "_", dName) > 0) || (index(dName, "docker") > 0) || (index(dName, "lxcbr") > 0) || (index(dName, "virbr") > 0) || (atLoc > 0))
 					dType = "virtual"
-				else if (((atLoc = index(dName, "-")) > 0) || (1 == index(dName, "vmbr")))
+				else if (((atLoc = index(dName, "-")) > 0) || (1 == index(dName, "vmbr")) || (1 == index(dName, "br")))
 				 {
 					dType = "bridge"
+					dBdg = dBdg == "" ? dName : dBdg "" dName
 					if (atLoc > 0)
 						dName = substr(dName, 0, atLoc - 1) "_" substr(dName, atLoc +1)
 				 }
@@ -274,13 +316,17 @@ IfProbe()
 			   }
 			else if ("inet" == $1)
 			 {
-				dAddr = $2
-				dMask = $4
-				dCast = $6
-				split(dAddr, a, "/")
-				dAddr=a[1]
-				if (a[2] != "") dMask=a[2]
-				if (dActi == "running") dActi = "active"
+				if ($2 !~ /^169.254\./)
+				 {
+					dAddr = $2
+					dMask = $4
+					dCast = $6
+					split(dAddr, a, "/")
+					dAddr=a[1]
+					if (a[2] != "") dMask = a[2]
+					if (dActi == "running") dActi = "active"
+				 }
+				dAlia = dAlia == "" ? $2 : dAlia " " $2
 			 }
 			else if ("inet6" == $1)
 			 {
@@ -368,7 +414,7 @@ IfProbe()
 			if (dWifi != "" && dExt == "")
 				dExt = dWifi
 
-			print "IFSUPV=1.0.8.2022.11.14"			# Version of me
+			print "IFSUPV=1.1.3.2023.11.10"			# Version of me
 			print "IFALL=\"" dAll "\""				# All Devices
 			print "IFAUTO=\"" dAut "\""				# Auto Config Devices
 			print "IFAIP=\"" dAip "\""				# Auto Config IPs
@@ -379,6 +425,8 @@ IfProbe()
 			print "IFATH=\"" dAEth "\""				# Active Ethernet
 			print "IFTUN=\"" dTun "\""				# Tunnel Devices
 			print "IFETC=\"" dOther "\""			# WTF
+			print "IFSLV=\"" dSlave "\""			# Slave devices (no explicit dhcp e.g.)
+			print "IFMST=\"" dMstr "\""				# Master devices - own the prior gnomes
 			print "IFLOC=\"" dLoc "\""				# Localhost / Loopback
 			print "IFLAN=\"" dLan "\""				# Private IP devices
 			print "IFWAN=\"" dWan "\""				# Public IP devices

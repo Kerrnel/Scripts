@@ -1,12 +1,17 @@
 #!/bin/bash
-gVersion=0.16
-gStamped=230313
+gVersion=0.21
+gStamped=230902
 #
 #	xmlp (c) 2020-23 Greg Kerr, Akua Co.
 #
 #	License: Public Domain
 #
 #	History
+#	021	GLK	230902	Failed to wget reddit.com - made curl and links higher priority, added WRE for referer (probably not needed)
+#	020	GLK	230610	Merge in YML start from Rock
+#	019	GLK	230516	Treat tr tags as array if encountered while parsing XML so -he can convert a table snippet
+#	018	GLK	230327	EQC for = symbol
+#	017	GLK	230320	Some bug in comments with -> in them causes text until over-next --> to be included in comment, fix Usage
 #	016	GLK	230313	Support wrapped tags in comments - e.g. <!-- <disabled>Something</disabled> -->
 #	015	GLK	230312	CompressTag on DKD starting paths based on DKD* instead of DDD* (Dict/Key items compress based on Dict, not path)
 #	014	GLK	230311	-V option for KVO format - bash executable key value output
@@ -45,6 +50,10 @@ gStamped=230313
 # XML Format
 #	Key preceded by number of tabs as prior key paths
 
+# Static
+WUA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+WRE='http://www.akua.com/refer-me-to-your-leader/'
+
 # Globals config defaults - settable by cl options
 DEBUG=0			# Noisy?
 RAWCONTENT=0	# Process html content tags as XML ... scale 0 to 2
@@ -61,6 +70,7 @@ NEXTC=0			# This is set to NEXTS when SUFFIX matches
 ONLYVALUE=0		# No tag path: prefix
 EXPAND=0		# Expanded full paths per line vs . per matching component
 OUTXML=0		# Output XML again (after edits presumably)
+OUTYML=0		# Output streaming YAML
 MULTILINE=0		# Convert new line to $NEWLINE in values (happens for all comments)
 NEWLINE=';;'	# Convert \n to this if MULTILINE -ne 0
 READRAW=0		# Just dump tag reading
@@ -75,7 +85,6 @@ CONTENT=''		# Text between <TAG ...> and </TAG>
 TAG=''			# TAG of entity e.g. <TAG prop=1 prop2=3>, case sensitive by XML specification
 CMT=''			# Parsed comment tag
 CMTN=0			# Comment index (for identification)
-PRIOR=''		# Prior tag (can change behavior - e.g. 'key' prior makes IGNOREBLANK ignored for next)
 PROP=''			# properties of TAG
 SINGLET=0		# Is the tag a singlet (ends with /> like img, link)
 LASTWP=''		# Last tag output (to compress path)
@@ -88,9 +97,12 @@ CCP=''			# Current content tag path
 SKIPLINE=0		# Skipping current line - don't print Fields
 AUTOX=''		# Auto Index Counters
 AUTON=0			# Current Auto Index
-PRIOR=''		# Prior scanned tag
+PRIOR=''		# Prior tag (can change behavior - e.g. 'key' prior makes IGNOREBLANK ignored for next)
 PRION=''		# Prior popped tag (came out of)
 QUOTE=''		# Place before and after value outputs
+
+# Document Global
+HASARRAY=0		# Encountered array (for CSV HTML table vs CVS xml) - does not work because of pipe
 
 # Delimiters
 SUD='/'			# Subelement Delimiter
@@ -100,6 +112,7 @@ PRD='.'			# Property delimiter
 DDD="[$SUD$DKD$SND$PRD]"	# For path compression Path delimiters (LASTWP)
 IXD='^'			# Index delimiter - within a tag
 DAD='.'			# Path compression, use prior path - last [DDD] component + rest after DAD
+EQC='='			# Key=Value separator
 
 Msg()
  {
@@ -141,13 +154,15 @@ ReadRaw()
 	if read -r -d \< -t 33 ENTITY CONTENT; then
 #		DbgMsg "E: $ENTITY"
 #		DbgMsg "C: $CONTENT"
-		CONTENT="${CONTENT#"${CONTENT%%[![:space:]]*}"}"	# Remove leading whitespace characters	
-		CONTENT="${CONTENT%"${CONTENT##*[![:space:]]}"}"	# Remove trailing whitespace characters
 		CMT="${ENTITY#!--}"				# Comment also single tag element - only support comments that have no '>' in them (terminator)
+		CONTENT="${CONTENT%"${CONTENT##*[![:space:]]}"}"	# Remove trailing whitespace characters
 		if [ "$CMT" != "$ENTITY" ]; then
+			[ -n "$CONTENT" ] && CMT="${ENTITY}>${CONTENT%>}"
 			# Get rest of comment up to -->
 			while [ "$CMT" = "${CMT%--}" ]; do
+				DbgMsg "C: $CMT"
 				if read -r -d \< -t 33 TAG; then
+					DbgMsg "D: $TAG"
 					TAG="${TAG%"${TAG##*[![:space:]]}"}"			# Remove trailing whitespace characters
 					[ "$TAG" != "${TAG%-->}" ] && TAG="${TAG%>}"	# At end of comment?
 					CMT="${CMT}<$TAG"
@@ -158,6 +173,7 @@ ReadRaw()
 			PROP="${CMT%--}"
 			TAG='!--'
 		else
+			CONTENT="${CONTENT#"${CONTENT%%[![:space:]]*}"}"	# Remove leading whitespace characters	
 			ENTITY="${ENTITY%"${ENTITY##*[![:space:]]}"}"		# Remove trailing whitespace characters
 			SINGLET=1
 			TAG="${ENTITY%/}"				# Single tag element? (ends with / or starts with !)
@@ -183,10 +199,10 @@ ReadTag()
 
 	# -d delimiter, -r backslash not a shell char, -t timeout in seconds
 	if read -r -d \< -t 33 ENTITY CONTENT; then
-		CONTENT="${CONTENT#"${CONTENT%%[![:space:]]*}"}"	# Remove leading whitespace characters	
-		CONTENT="${CONTENT%"${CONTENT##*[![:space:]]}"}"	# Remove trailing whitespace characters
 		CMT="${ENTITY#!--}"				# Comment also single tag element - only support comments that have no '>' in them (terminator)
+		CONTENT="${CONTENT%"${CONTENT##*[![:space:]]}"}"	# Remove trailing whitespace characters
 		if [ "$CMT" != "$ENTITY" ]; then
+			[ -n "$CONTENT" ] && CMT="${ENTITY}>${CONTENT%>}"
 			# Get rest of comment up to -->
 			while [ "$CMT" = "${CMT%--}" ]; do
 				if read -r -d \< -t 33 TAG; then
@@ -200,6 +216,7 @@ ReadTag()
 			PROP="${CMT%--}"
 			TAG='!--'
 		else
+			CONTENT="${CONTENT#"${CONTENT%%[![:space:]]*}"}"	# Remove leading whitespace characters	
 			ENTITY="${ENTITY%"${ENTITY##*[![:space:]]}"}"		# Remove trailing whitespace characters
 			SINGLET=1
 			TAG="${ENTITY%/}"				# Single tag element? (ends with / or starts with !)
@@ -250,10 +267,11 @@ ReadXmlTag()
 					CONTENT=''
 				fi
 			  ;;
-			  '/array')
+			  '/array'|'/tr')
 				pDic="${pTag%#*}"
 				# Revert array number in path to array
-				[ "$pDic" != "$pTag" ] && CWP="${CWP%${SUD}#*}${SUD}array"
+				[ "$pDic" != "$pTag" ] && CWP="${CWP%${SUD}#*}${SUD}${TAG#/}"
+				HASARRAY=1
 			  ;;
 			  '/dict')
 				# Revert path from $DKD to being a dict
@@ -261,7 +279,7 @@ ReadXmlTag()
 			  ;;
 			  *)
 				case "$pDic" in
-				  'array')
+				  'array'|'tr')
 					AUTOIDX=0	# Have arrays, turn this off
 					ARRAYIDX=1
 					if [ $ARRAYNUMS -eq 0 ]; then
@@ -301,8 +319,10 @@ ReadXmlTag()
 				[ -z "$match" ] && match="$ROOTELEM"
 				[ "${TAG#/}" != "$match" ] && Msg "*** XML Tag mismatch at $CWP [$match] (${TAG#/} expected)"
 				# Msg "<------------ Pop $TAG from ($CWP - $CONTENT)"
-				PRION="$TAG"
 				DEPTH=$(($DEPTH - 1))
+				# If not compressing, must indicate end of record
+				[ $EXPAND -ne 0 -a $FLATKEY -eq 0 ] && PrintTag "$TAG" '.'
+				PRION="$TAG"
 				[ $DEPTH -eq 0 ] && CWP='' || CWP="${CWP%${SUD}*}"
 				TAG=''							# Coming up
 			fi
@@ -403,7 +423,25 @@ PrintTag()
 	shift
 	[ -z "$tag" ] && tag="$CWP" && DbgMsg "TCWP: $tag [$PROP]"
 
-	if [ $OUTXML -eq 0 ]; then
+	if [ $OUTYML -eq 0 ]; then
+		DbgMsg "PTAG: [$tag] [$PROP] $IGNOREBLANK [$PRIOR]"
+		if [ "$TAG" = '!--' ]; then
+			PROP=$(echo "$PROP" | MultiLine)
+			PrintLine '#' "$PROP"
+			CMTN=$((1 + $CMTN))
+		else
+			[ $MULTILINE -ne 0 ] && PROP=$(echo "$PROP" | MultiLine)
+			if [ "$PROP" != "${PROP#*\&}" ]; then
+#				Msg "*** [$tag][$PROP]"					# PROP can have '&amp;'
+				HtmlUnraw "$PROP"; PROP="$OUT"
+				HtmlUnraw "$tag"; tag="$OUT"
+#				Msg "+++ [$tag][$PROP]"					# PROP can have '&amp;'
+			fi
+			eval PrintProps \"$tag\" $PROP          # Need to get props as "$@" - for i in $PROP fails to break words properly (without eval, HTML parse failed on two word alt img tag)
+			[ $MULTILINE -ne 0 ] && CONTENT=$(echo "$CONTENT" | MultiLine)
+			PrintLine "$tag" "$CONTENT"
+		fi
+	elif [ $OUTXML -eq 0 ]; then
 		DbgMsg "PTAG: [$tag] [$PROP] $IGNOREBLANK [$PRIOR]"
 		if [ "$TAG" = '!--' ]; then
 			PROP=$(echo "$PROP" | MultiLine)
@@ -411,6 +449,7 @@ PrintTag()
 			CMTN=$((1 + $CMTN))
 		else
 			[ $MULTILINE -ne 0 ] && PROP=$(echo "$PROP" | MultiLine)
+			# Got a spurious error on next line saying: amp: command not found
 			eval PrintProps \"$tag\" $PROP		# Need to get props as "$@" - for i in $PROP fails to break words properly (without eval, HTML parse failed on two word alt img tag)
 			[ $MULTILINE -ne 0 ] && CONTENT=$(echo "$CONTENT" | MultiLine)
 			PrintLine "$tag" "$CONTENT"
@@ -502,7 +541,7 @@ PrintField()
 					l=$(echo "$l" | sed -e "s/$QUOTE/$QUOTE\\\\$QUOTE$QUOTE/g")
 				fi
 			fi
-			[ $ONLYVALUE -eq 0 ] && echo "${tag}=${QUOTE}${l}${QUOTE}" || echo "${QUOTE}$l${QUOTE}"
+			[ $ONLYVALUE -eq 0 ] && echo "${tag}${EQC}${QUOTE}${l}${QUOTE}" || echo "${QUOTE}$l${QUOTE}"
 		else
 			for ((l=$DEPTH; l>0; l--)); do printf "\t"; done
 			echo "<$tag>${l}</$tag>"
@@ -562,6 +601,19 @@ FlattenHtml()
 	CWP="$cwo"
  }
 
+HtmlUnraw()
+ {
+	if [ $BASH_VERSINFO -gt 3 ]; then
+		OUT="${1//&lt;/<}"
+		OUT="${OUT//&gt;/>}"
+		OUT="${OUT//&amp;/&}"
+		OUT="${OUT//&quot;/\"}"
+		OUT="${OUT//&#32;/ }"		OUT="${OUT//&#032;/ }"
+		OUT="${OUT//&#39;/\'}"		OUT="${OUT//&#039;/\'}"
+	else
+		OUT=$(echo "$1" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e 's/&amp;/\&/g' -e 's/&#32;/ /g' -e 's/&#032;/ /g' -e "s/&#39;/\'/g" -e "s/&#039;/\'/g")
+	fi
+ }
 
 DoContentTag()
  {
@@ -569,16 +621,8 @@ DoContentTag()
 
 	# Basic HTML encoded special character conversion ... and send it on down the processor
 	if [ $RAWCONTENT -lt 2 ]; then
-		if [ $BASH_VERSINFO -gt 3 ]; then
-			html="$2"
-			html="${html//&lt;/<}"
-			html="${html//&gt;/>}"
-			html="${html//&amp;/&}"
-			html="${html//&quot;/\"}"
-			html="${html//&#32;/ }"
-		else
-			html=$(echo "$2" | sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e 's/&amp;/\&/g' -e 's/&#32;/ /g')
-		fi
+		HtmlUnraw "$2"
+		html="$OUT"
 		InfoMsg "HTML: $html"
 	fi
 
@@ -654,6 +698,15 @@ DoXML()
 	InfoMsg "LEAVE: XML $ROOTELEM"
  }
 
+DoTheRightThing()
+ {
+	if [ $OUTCSV -ne 0 ]; then
+		([ $IGNOREXML -eq 0 ] && DoXML || FlattenXml) | OutCSV
+	else
+		[ $IGNOREXML -eq 0 ] && DoXML || FlattenXml
+	fi
+ }
+
 FieldCSV()
  {
 	local	v="$1"
@@ -684,7 +737,8 @@ FieldCSX()
 			v=$(echo "$v" | sed -e 's/v:^:v/,/g')
 		fi		
 	fi
-	OUT="$v"
+	echo "$v"
+#	OUT="$v"
  }
 
 OutCSV()
@@ -700,64 +754,83 @@ OutCSV()
 	while read line; do if [ $P -ne 0 -o "${line#${SUD}}" != "$line" ]; then
 		P=1							# Processing after first item
 		t="${line%%=*}"				# First field name
+		[ "$t" != "${t%/td/*}" ] && t="${t%/td/*}/td"
 		FieldCSV "${t##*${DDD}}"	# Base name
 		t="$OUT"
 		FieldCSV "${line#*=}"		# Value part
 		v="$OUT"
 
-		# Find field in title
-		s="$title"
-		p=0
-		n=0
-		while [ -n "$s" -a $p -eq 0 ]; do
-			n=$((1 + $n))
-			[ "${s%%,*}" = "$t" ] && p=$n
-			[ "${s#*,}" = "$s" ] && s='' || s="${s#*,}"
-		done
-
-		if [ $p -eq 0 ]; then
-			# New field
-			p=$n
-			[ $p -gt $cnt ] && cnt=$p
-			[ -z "$title" ] && title="$t" || title="${title},$t"
-			[ -z "$L" ] && L="$v" || L="${L},$v"
-		else
-			# Add field - if it collides, print line and start new
-			n=$p
-			s="$L"
-			L=''
-			while [ -n "$s" -a $n -gt 0 ]; do
-				f="${s%%,*}"
-				[ -z "$L" ] && L="$f" || L="${L},$f"
+		case "$t" in
+		  'th')
+			HtmlUnraw "$v"
+			[ -z "$title" ] && title="$OUT" || title="${title},$OUT"
+			cnt=$((1 + $cnt))
+		  ;;
+		  'td')	# Could be td/div/div/span=
+			[ -z "$first" ] && first="${title##,*}" && FieldCSX "$title"
+			# Get array item number
+			p="${line%%=*}"
+			p="${p%/td*}"
+			p="${p##*#}"
+			[ $p -eq 1 -a -n "$L" ] && FieldCSX "$L" && L=''
+			HtmlUnraw "$v"
+			[ -z "$L" ] && L="$OUT" || L="${L},$OUT"
+		  ;;
+		  *)
+			# Find field in title
+			s="$title"
+			p=0
+			n=0
+			while [ -n "$s" -a $p -eq 0 ]; do
+				n=$((1 + $n))
+				[ "${s%%,*}" = "$t" ] && p=$n
 				[ "${s#*,}" = "$s" ] && s='' || s="${s#*,}"
-				n=$(($n - 1))
 			done
-			if [ $n -gt 0 ]; then
-				# We have to create fields
-				while [ $n -gt 1 ]; do
-					L="${L},"
-					n=$(($n - 1))
-				done
-				L="${L},$v"
-			elif [ -z "$f" ]; then
-				# Empty field, replace it
-				L="${L},$v,$s"
+
+			if [ $p -eq 0 ]; then
+				# New field
+				p=$n
+				[ $p -gt $cnt ] && cnt=$p
+				[ -z "$title" ] && title="$t" || title="${title},$t"
+				[ -z "$L" ] && L="$v" || L="${L},$v"
 			else
-				# Collision, new row
-				[ -z "$first" ] && first="${title##,*}" && FieldCSX "$title" && echo "$OUT"
-				[ -n "$s" ] && L="${L},${s}"
-				FieldCSX "$L"
-				echo "$OUT"
+				# Add field - if it collides, print line and start new
+				n=$p
+				s="$L"
 				L=''
-				while [ $n -gt 0 ]; do
-					L="${L},"
+				while [ -n "$s" -a $n -gt 0 ]; do
+					f="${s%%,*}"
+					[ -z "$L" ] && L="$f" || L="${L},$f"
+					[ "${s#*,}" = "$s" ] && s='' || s="${s#*,}"
 					n=$(($n - 1))
 				done
-				[ -n "$L" ] && L="${L},$v" || L="$v"
+				if [ $n -gt 0 ]; then
+					# We have to create fields
+					while [ $n -gt 1 ]; do
+						L="${L},"
+						n=$(($n - 1))
+					done
+					L="${L},$v"
+				elif [ -z "$f" ]; then
+					# Empty field, replace it
+					L="${L},$v,$s"
+				else
+					# Collision, new row
+					[ -z "$first" ] && first="${title##,*}" && FieldCSX "$title"
+					[ -n "$s" ] && L="${L},${s}"
+					FieldCSX "$L"
+					L=''
+					while [ $n -gt 0 ]; do
+						L="${L},"
+						n=$(($n - 1))
+					done
+					[ -n "$L" ] && L="${L},$v" || L="$v"
+				fi
 			fi
-		fi
+		  ;;
+		esac
 	fi; done
-	[ -n "$L" ] && FieldCSX "$L" && echo "$OUT"
+	[ -n "$L" ] && FieldCSX "$L"
  }
 
 GetURL()
@@ -767,9 +840,10 @@ GetURL()
 	local	w f e
 
 	if [ "${1%%://*}" != "$1" ]; then
-		w=$(which 'wget' 2>/dev/null)
-		f='-O - -U "Mozilla/4.0"'
-		[ -z "$w" ] && w=$(which 'curl' 2>/dev/null) && f='-sA "Mozilla/4.0"'
+		# 2023 - wget 403ing on reddit.com - curl with -L successful
+		[ -z "$w" ] && w=$(which 'curl' 2>/dev/null) && f='-L -sA "'"$WUA"'" -H "'"Referer: $WRE"'"'
+		[ -z "$w" ] && w=$(which 'links' 2>/dev/null) && f='-dump'
+		[ -z "$w" ] && w=$(which 'wget' 2>/dev/null) && f='-O - -U "'"$WUA"'" "--referer='$WRE'"'
 		if [ -z "$w" ]; then
 			echo "Need curl or wget to get URLs"
 			exit 1
@@ -778,12 +852,23 @@ GetURL()
 		$w $f "$1" 2>/dev/null
 		e=$?
 		DbgMsg "Loaded ($e): $1"
-	else
+	elif [ -f "$1" ]; then
 		if which 'plutil' > /dev/null 2>&1; then
-			grep -q '?xml' "$1" && cat "$1" || plutil -convert 'xml1' -o - "$1"
+			# Text xml?
+			if grep -q '?xml' "$1"; then
+				cat "$1"
+			elif plutil "$1" > /dev/null 2>&1; then
+				plutil -convert 'xml1' -o - "$1"
+			else
+				# Some random thing
+				cat "$1"
+			fi
 		else
+			# No plutil to consider
 			cat "$1"
 		fi
+	else
+		echo "$1 not found" >&2
 	fi
  }
 
@@ -791,7 +876,7 @@ Usage()
  {
 	local	b=$(basename "$0")
 
-	Msg '-' "Usage: $b [-a][-b][-C][-c][-d][-f][-h][-i][-k][-K c][-l][-m path][-n #][-Q c][-q][-s suffix][-t][-V][-x][-?] [URL or pathToFile, will use stdin if available]
+	Msg '-' "Usage: $b [-a][-b][-C][-c][-d][-e][-E c][-f][-h][-i][-k][-K c][-l][-m path][-n #][-Q c][-q][-s suffix][-t][-V][-x][-?] [URL or pathToFile, will use stdin if available]
 
 	-a	Array item numbers blank (useful when searching for any array item)
 	-b	Ignore blank lines toggle (default ON)
@@ -799,21 +884,24 @@ Usage()
 	-c	Increase rawness content fields (parsed as XML -> HTML -> raw)
 	-d	Increase verbosity
 	-e	Expand full paths (vs compressed . for each matching component to parent)
-	-f	Stop parsing after nth match (see -m) per stream. Can specify multiple for multiple matches.
+	-E c	Change key-value separator (default $EQC)
+	-f	Stop parsing after first match (see -m) per stream. Can specify multiple for multiple matches.
 	-h	Ignore search for ?xml tag to start (e.g. parse HTML)
 	-i	Disable auto indexer (array detector)
-	-k	Toggle flatten key tag into path - key/val couplets as path/key/name/type:value
+	-k	Dict/key compression toggle (default !$EXPAND) - flatten dict/key into cwp${DKD}keyname/type${EQC}value
 	-K	Set dict/key compression character (default $DKD)
 	-l	Line break conversion to ;; for values (happens for comments by default)
-	-L	Change ;; to this for newline replacement
+	-L crc	Change ;; to this for newline replacement
 	-m pth	Match - only output if /path matches given path (at head)
 	-n cnt	Next n fields after match included (-s applies)
-	-q	Do not prefix each line with /path: - just value
+	-q	Do not prefix each line with /path${EQC}
 	-Q c	Quote character before and after values
+	-r	Raw mode - just to test tag parsing code
 	-s sfx  Suffix match - match backside (e.g. .jpg)
 	-t	Ignore content layout tags like tables, divs, spans
-	-V	Outpot in bash executable KV format (a=b where a legal variable name and b quoted value)
+	-V	Output in bash executable KV format (a=b where a is a legal variable name and b a quoted value)
 	-x	Output XML ... work in progress
+	-y	Output YML ... work in progress
 
 	or - cat file.xml | $b ...
 
@@ -821,7 +909,7 @@ Usage()
 	Version of macOS thing: xmlp -m ${DKD}CFBundleShortVersionString -q -f /System/Applications/Mail.app/Contents/Info.plist
 	Reddit RSS images with URLs: xmlp -n 1 -m '${SUD}entry${SUD}content${SUD}a.href' -s '.jpg' -q 'https://reddit.com/r/cityporn/rising/.rss'
 	Use StdIn: cat /path/to/xmlfile.xml | xmlp
-	CVS Output: xmlp -C https://www.w3schools.com/xml/plant_catalog.xml
+	CSV Output: xmlp -C https://www.w3schools.com/xml/plant_catalog.xml
 
 	Issues: Wider range of XML file testing, more intelligent choices
 
@@ -831,13 +919,14 @@ Usage()
 
 URL=''
 
-while getopts 'abCcdefhiK:kL:lm:n:Q:qrs:tVx?' o; do case "$o" in
+while getopts 'abCcdeE:fhiK:kL:lm:n:Q:qrs:tVxy?' o; do case "$o" in
   'a')	ARRAYNUMS=$((1 - $ARRAYNUMS))		;;	# Toggle showing array item numbers
   'b')	IGNOREBLANK=$((1 - $IGNOREBLANK))	;;	# Don't print lines with no value
   'C')	OUTCSV=$((1 + $OUTCSV))				;;	# Output CSV format
   'c')	RAWCONTENT=$((1 + $RAWCONTENT))		;;	# Rawness of HTML ouput (parsed, HTML, raw)
   'd')	DEBUG=$((1 + $DEBUG))				;;
   'e')	EXPAND=$((1 + $EXPAND))				;;	# Expand output from compressed -> paths -> XML (XML not yet done)
+  'E')	EQC="$OPTARG"						;;	# Equal character
   'f')	ONLYFIRST=$((1 + $ONLYFIRST))		;;	# Return after finding first MATCH (-m)
   'h')	IGNOREXML=$((1 - $IGNOREXML))		;;	# Allow HTML?
   'i')	AUTOIDX=$((1 - $AUTOIDX))			;;	# Array detector
@@ -854,6 +943,7 @@ while getopts 'abCcdefhiK:kL:lm:n:Q:qrs:tVx?' o; do case "$o" in
   't')	IGNORELAYOUT=$((1 - $IGNORELAYOUT))	;;	# Ignore content layout
   'V')	OUTKVO=$((1 + $OUTKVO))				;;	# Output KVO format
   'x')	OUTXML=$((1 + $OUTXML))				;;	# Output XML again
+  'y')	OUTYML=$((1 + $OUTYML))				;;	# Output YML
   '?')	Usage; exit 0						;;
   *)	Msg "Unknown option: $1"			;;
 esac; done
@@ -880,18 +970,10 @@ fi
 # If we get a URL - use it, else if no stdin - Usage - else process stdin
 if [ -n "$URL" ]; then
 	echo "$URL" | while read line; do if [ -n "$line" ]; then
-		if [ $OUTCSV -eq 0 ]; then
-			GetURL "$line" | DoXML
-		else
-			GetURL "$line" | DoXML | OutCSV
-		fi
+		GetURL "$line" | DoTheRightThing
 	fi; done
 elif [ -t 0 ]; then
 	Usage
 else
-	if [ $OUTCSV -eq 0 ]; then
-		[ $IGNOREXML -eq 0 ] && DoXML || FlattenXml
-	else
-		[ $IGNOREXML -eq 0 ] && DoXML || FlattenXml | OutCSV
-	fi
+	DoTheRightThing
 fi
