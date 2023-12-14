@@ -1,0 +1,559 @@
+#!/bin/sh
+#############################################################################
+gDate=231214
+gVers=007
+#############################################################################
+#	Aerialist 1.07
+#
+#	A rewrite / rework of the Aerial screensaver concept
+#
+#	(p) Public Domain, 2023 by (mostly)	Greg Kerr
+#############################################################################
+#
+#	* Usage
+#	
+#	Call with 'install' (or look at 'install' below to see how) to install
+#		into .xscreensaver file
+#
+#	Call with 'online' to force streaming AppleTV
+#
+#	* Notes
+#	Video descriptions incomplete - could not find a table of them online
+#		(See VideoDescription function below)
+#
+#	History
+#	007	GLK	231214	Tear up night/day ... just use seasons, Apple video integration
+#	006	GLK	231212	Support youtube-dl videos with .webm, .mp4, .mkv, sound option in SEASONS
+#	005	GLK	231211	In support of christmas (Fireplace videos), allow "Aerial" itself to be changed (SEASON)
+#	004	GLK	231210	panscan parameter per AUR
+#	003	GLK	231113	Test/fix on NetBSD and 'install'
+#	002	GLK	231112	Lock (workaround some leftovers detected), ONLINE option
+#	001	GLK	231105	Partial rewrite
+#
+#	Changes to original (became almost a rewrite save for a few lines
+#	If $MOVIES folder exists, find videos instead of predefined lists
+#		(still used for streaming mode)
+#	BSD (bourne/dash rewrite) compatible
+#
+#	Tested:		on Artix, Void, PopOS, FreeBSD
+#	Requires:	mplayer, awk (install), sed, grep & friends, youtube-dl, curl
+#############################################################################
+#					Parameters												#
+# Options - override in ~/.config/aerialist with shell format script
+ONLINE=1					# Allow network video play - set to 2 to FORCE online
+ONLINE4K=0					# Online 4K option (vs 2K if available)
+ONLINEHDR=0					# Online HDR option (vs SDR if available)
+ONLINETPT='http'			# Transport to get online assets
+CACHE=1						# Download Online videos to MOVIES folder
+TEST=0						# Just show the video that would play
+SUBINTERVAL=3				# Description every this many minutes
+SUBREPEATS=33				# Number of times to repeat @ SUBINTERVAL
+MOVIES=~/Videos/Aerialist	# Master Path of MOVIES folders (required if ONLINE == 0)
+PANSCAN=1.0					# Crop 16:9 movies - set to 0 to not do it
+SEASON='Aerial'				# Switch preferences and everything associated with 
+SOUND=0						# 0-100 audio volume, set in ~/.config/aerial if you wish videos with sound
+
+# December Fireplace?
+# Format - Weekday M-D-Begin M-D-End 24HourBeg 24HourEnd Selection AudioVolume
+SEASONS='
+	*	12-1	2-14	19	7	22	Fireplace
+	*	*		*		19	7	11	Night
+	*	*		*		12	19	9	Places
+	*	*		*		*	*	11	Apple
+'
+############################################################################
+
+# Global
+MPID=0				# MPlayer pid
+TESTME=''			# Fake a selection with test XYZ (use 'test' 'VideoPath')
+
+# Markers
+OS_TYPE=$(uname -s)
+USER=$(id -un)
+UID=$(id -u)
+
+# XDG
+[ -z "$XDG_CONFIG_HOME" ] && XDG_CONFIG_HOME=~/'.config'
+[ ! -d "$XDG_CONFIG_HOME" ] && mkdir -p "$XDG_CONFIG_HOME"
+
+[ -z "$XDG_RUNTIME_DIR" ] && XDG_RUNTIME_DIR="/var/run/user/$UID"
+[ ! -d "$XDG_RUNTIME_DIR" ] && {
+	mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
+	[ ! -d "$XDG_RUNTIME_DIR" ] && XDG_RUNTIME_DIR="/tmp/run-user-$UID"
+	mkdir -p "$XDG_RUNTIME_DIR"
+ }
+
+# Allow preferences override in .config/aerialist
+[ -e "$XDG_CONFIG_HOME/aerialist" ] && . "$XDG_CONFIG_HOME/aerialist"
+
+# Are we inside xscreensaver?
+[ -n "$XSCREENSAVER_WINDOW" ] && WINDOWID="-wid $XSCREENSAVER_WINDOW" || TEST=1
+
+Msg()	{	echo "$(date +%k:%M:%S)	$@" >&2;			}
+Dbg()	{	[ $TEST -ne 0 ] && Msg "+++ [$@] +++";	}
+Err()	{	Msg "*** [$@] ***";							}
+Throw()	{	Err "$@"; exit 44;							}
+
+SeasonMatch()
+ {
+	# Process SEASON table (on stdin) and echo firast matched Season - or $1 if no match
+	local	d m w H M pw pdb pde phb phe pS pmb pme egb snd
+
+	M=$(date "+%d %m %w %H %M")
+	d="${M%% *}";	M="${M#* }"
+	m="${M%% *}";	M="${M#* }"
+	w="${M%% *}";	M="${M#* }"
+	H="${M%% *}";	M="${M#* }";	H="${H#0}";	M="${M#0}"
+
+	while read pw pdb pde phb phe snd pS; do if [ -n "$pw" ]; then
+		# Dbg "Season?: [$pw][$pdb[$pde][$phb][$phe][$pS][$d/$m/$w/$H/$M]" >&2
+		# * Matches anything
+		if [ "$pw" = '*' -o "$pw" = "$w" ]; then
+			pmb="${pdb%-*}";	pdb="${pdb#*-}"
+			pme="${pde%-*}";	pde="${pde#*-}"
+			# echo "Season-: [$pmb[$pme][$pdb][$pde]" >&2
+			dm=0
+			if [ "$pmb" = '*' -o "$pme" = '*' ]; then
+				dm=1
+			else
+				# If at start month, >= start day ... if Left to right, inside, else outide
+				[  \( $m -eq $pmb -a $d -ge $pdb \) \
+				-o \( $m -eq $pme -a $d -le $pde \) \
+				-o \( $pmb -lt $pme -a $m -gt $pmb -a  $m -lt $pme \) \
+				-o \( $pmb -gt $pme -a \( $m -gt $pmb -o $m -lt $pme \) \) ] && dm=1
+			fi
+			# If match so far, check hour range
+			if [ $dm -ne 0 ]; then
+				dm=0
+				if [ "$phb" = '*' -o "$phe" = '*' ]; then
+					dm=1
+				else
+					[  \( $phb -le $phe -a $H -ge $phb -a $H -le $phe \) \
+					-o \( $phb -ge $phe -a \( $H -ge $phb -o $H -le $phe \) \) ] && dm=1
+				fi
+				[ $dm -ne 0 ] && echo "$snd:$pS" && return 0
+			fi
+		fi
+	fi; done
+	echo "$1"	# Default if no match
+ }
+
+SourceSet()
+ {
+	local i
+	# Some alternative locations for MOVIES if it not a directory - or chosen based on Season election
+	for i in "${MOVIES%/*}/$SEASON" ~/"Videos/Aerial/$SEASON" '/home'/*/"VIDEO/Aerial/$SEASON" ~/"Videos/$SEASON" '/home'/*/"VIDEO/$SEASON" "/SHARE/VIDEO/COLLECTION/$SEASON"; do
+		[ -d "$i" ] && MOVIES="$i"
+	done
+
+	# Need a cache location?
+	if [ $ONLINE -ne 0 -a $CACHE -ne 0 ]; then
+		[ "${MOVIES##*/}" != 'Apple' ] && MOVIES="${MOVIES}/Apple"
+		[ ! -d "$MOVIES" ] && mkdir -p "$MOVIES"
+	fi
+
+	# End with / for find
+	[ "$MOVIES" = "${MOVIES%/}" ] && MOVIES="${MOVIES}/"
+
+	# database files to allow for no repeats when playing videos
+	# Subtitle to show occasional text
+	VIDEODB="$XDG_CONFIG_HOME/aerialist-${SEASON}"
+	SUBTITLE="$XDG_CONFIG_HOME/aerialist-${SEASON}.srt"
+
+	Dbg "Movies:	$MOVIES"
+ }
+
+SeasonSet()
+ {
+	# Get Season / Sound
+	if [ $ONLINE -gt 1 ]; then
+		SEASON='AppleTV'
+	else
+		[ -n "$SEASONS" ] && SEASON=$(echo "$SEASONS" | SeasonMatch "$SEASON")
+		SOUND="${SEASON%%:*}"
+		SEASON="${SEASON#*:}"
+	fi
+
+	Dbg "Season:	$SEASON"
+	SourceSet
+ }
+
+Install()
+ {
+	local	o a c
+
+	o=~/'.xscreensaver.pre-aerialist'
+	a=~/'.xscreensaver'
+
+	if [ -s "$a" ]; then
+		c="$0"
+		[ "$c" != "${c#/}" ] || c="$(pwd)/$c"
+		if grep -q "$c" "$a"; then
+			echo "$c is already installed in $a"
+		else
+			echo "
+------------------------------------------------------------------
+INSTALL
+	Original:	$o
+	Aerialist:		$a
+	Command:	$c
+
+Press return to install ${0##*/} into .xscreensaver, Ctrl-C to quit
+
+Type any parameters to add when started separated with a space:
+
+	Type 4k to use 4k videos when available
+	Type hdr to use HDR videos when available
+	Type volume X to set volume to X% when playing
+	Type offline to never use AppleTV online videos
+	Type online to always use AppleTV online videos
+	Type movies PATH to use PATH for video searching
+------------------------------------------------------------------"
+			read line
+			cp -f "$a" "$o"
+			echo "Installing [$c] as a screensaver..."
+			if [ -s "$o" ]; then
+				cat "$o" | awk -v "PRG=$c $line" '{ print $0;
+					# Funky format of .xscreensaver prefs - why not redone in 6.0?!? ;)
+					if ("programs:" == $1) print "\t\t\"Aerialist\"\t" PRG "\t\t\t    \\n\\"
+				 }' > "$a"
+				echo 'Should be installed, here is the diff:
+------'
+				diff "$a" "$o"
+			fi
+		fi
+	else
+		echo 'Please launch xscreensaver-demo once to have a configuration file to install into.'
+	fi
+
+	# Download videos?
+	exit 22
+ }
+
+# Install into xscreensaver and exit, test mode (just output what would happen)
+while [ -n "$1" ]; do case "$1" in
+  'install')	Install						;;
+  'online')		ONLINE=2					;;
+  'offline')	ONLINE=0					;;
+  'sound')		SOUND=25					;;
+  'volume')		SOUND="$2"; shift			;;
+  'movies')		MOVIES="$2"; shift			;;
+  'hdr')		ONLINEHDR=1					;;
+  '4k')			ONLINE4K=1					;;
+  'test')		TEST=1; TESTME="$2"; shift	;;
+esac; shift; done
+
+# Lock for this display
+lockf="$XDG_RUNTIME_DIR/.aerialist.${DISPLAY#:}.lock"
+if [ -e "$lockf" ]; then
+	pid=$(head -n 1 "$lockf")	# aerialist
+	case "$OS_TYPE" in
+	  'Linux')	f='-h -q'	;;
+	  *)		f='-p'		;;
+	esac
+	ps $f "$pid" >/dev/null 2>&1 && echo "Aerialist locked by $pid in $lockf" && exit 33
+	pid=$(tail -n 1 "$lockf")	# mplayer
+	ps $f "$pid" >/dev/null 2>&1 && kill -9 "$pid"
+fi
+echo $$ > "$lockf"
+
+# Show info in test mode
+if [ $TEST -ne 0 ]; then
+	echo "Aerialist:		$gVers ($gDate)
+Season:		$SEASON
+Movies:		$MOVIES
+XDG Conf:	$(ls -ld $XDG_CONFIG_HOME)
+XDG Runt:	$(ls -ld $XDG_RUNTIME_DIR)
+Mplayer:	$(which mplayer)
+Curl:		$(which curl)
+Process:	$$
+Lockfile:	$lockf"
+fi
+
+
+# Plays the video - local and remote
+for i in 'mplayer' 'curl'; do
+	command -v "$i" >/dev/null 2>&1 || Throw "${0##*/} requires $i but it's not installed. Aborting."
+done
+
+Random()
+ {
+	# Return random 0 through $1-1 in $OUT
+	local m="$(od -vAn -N4 -tu4 < /dev/urandom)"
+	m=1$(date '+%S')"${m#*[0-9]}"
+	[ $1 -eq 0 ] && OUT=0 || OUT=$(($m % $1))
+	Dbg "Random:	$OUT"
+ }
+
+RandomLine()
+ {
+	# Pick and remove a random line from a file
+	local	pick
+	Random $(wc -l "$1")
+	pick=$((1 + $OUT))
+	OUT=$(sed "${pick}q;d" "$1")	# Get the line
+#	cp "$1" "${1}.last"
+	case "$OS_TYPE" in
+	  'FreeBSD')	sed -i '' "${pick}d" "$1"	;;
+	  *)			sed -i "${pick}d" "$1"		;;	# Remove the line
+	esac
+ }
+
+ApplePit()
+ {
+	# Scan an AppleTV Json file for videos & properties
+	local	k c v k2h k2s k4h k4s l t
+	t='unk'
+	while read k c v; do
+		k="${k#\"}"
+		k="${k%%\"*}"
+		case "$k" in
+		  'accessibilityLabel')	l="${v#\"}";	l="${l%%\"*}"	;;
+		  'timeOfDay')		t="${v#\"}";	t="${t%\"}"			;;
+		  'url-1080-SDR')	k2s="${v#*:}";	k2s="${k2s%%\"*}"	;;
+		  'url-1080-HDR')	k2h="${v#*:}";	k2h="${k2h%%\"*}"	;;
+		  'url-4K-SDR')		k4s="${v#*:}";	k4s="${k4s%%\"*}"	;;
+		  'url-4K-HDR')		k4h="${v#*:}";	k4h="${k4h%%\"*}"	;;
+		  'url')			k2s="${v#*:}";	k2s="${k2s%%\"*}"	;;	# tvos 11 format
+		  '}'*)				[ -n "$l" -a -n "$k2s" ] && echo "$t:$l:$k2s:$k2h:$k4s:$k4h" && l=''	;;
+		esac
+	done
+	[ -n "$l" -a -n "$k2s" ] && echo "$t:$l:$k2s:$k2h:$k4s:$k4h"
+ }
+
+AppleVideoJson()
+ {
+	# ATVos 10, 11
+	local	u
+	for u in \
+		'http://sylvan.apple.com/Aerials/2x/entries.json' \
+		'http://a1.phobos.apple.com/us/r1000/000/Features/atv/AutumnResources/videos/entries.json' \
+		; do
+		curl "$u" 2>/dev/null | ApplePit
+	done
+ }
+
+AppleVideoTar()
+ {
+	# ATVos 12+
+	local u p
+	for u in \
+		'http://sylvan.apple.com/Aerials/resources.tar' \
+		'http://sylvan.apple.com/Aerials/resources-13.tar' \
+		'http://sylvan.apple.com/Aerials/resources-14.tar' \
+		'http://sylvan.apple.com/Aerials/resources-15.tar' \
+		'http://sylvan.apple.com/Aerials/resources-16.tar' \
+		'http://sylvan.apple.com/Aerials/resources-17.tar' \
+		; do
+		(	p="/tmp/Aerialist.$USER.$$"
+			mkdir -p "$p"
+			cd "$p"
+			curl -o 'tv.tar' "$u" 2>/dev/null
+			tar xf 'tv.tar' 'entries.json' 2>/dev/null
+			[ -s 'entries.json' ] && cat 'entries.json' | ApplePit 2>/dev/null
+			rm -f 'tv.tar' 'entries.json'
+			cd ..
+			rmdir "$p")
+	done
+ }
+
+AppleVideo()
+ {
+	AppleVideoJson
+	AppleVideoTar
+ }
+
+ChooseVideo()
+ {
+	local	n i hour
+
+	SeasonSet	# Select right set of videos
+
+	Dbg "Movie DB:	$VIDEODB"
+
+	# If db is empty, find all the '*.mov' videos in $MOVIES for night or day and stash in VIDEODB or NIGHT_DB
+	# Select and delete one line from VIDEODB or NIGHT_DB, store in $CHOICE
+	if [ ! -s "$VIDEODB" ]; then
+		if [ -d "$MOVIES" -a "$SEASON" != 'AppleTV' ]; then
+			Dbg "Find:	find \"$MOVIES\" -type f -iname '*.mkv' -o -iname '*.mov' -o -iname '*.mp4' -o  -iname '*.webm'"
+			find "$MOVIES" -type f -iname '*.mkv' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.webm' > "$VIDEODB"
+			n=$(wc -l "$VIDEODB"); n="${n%% *}"
+			Dbg "Found:	$n videos"
+		else
+			n=0
+		fi
+		if [ $n -le 0 ]; then
+			[ $ONLINE -eq 0 ] && Throw "No videos in $MOVIES"
+			[ -s "$XDG_CONFIG_HOME/aerialist-apple" ] || AppleVideo > "$XDG_CONFIG_HOME/aerialist-AppleURL"
+			cp "$XDG_CONFIG_HOME/aerialist-AppleURL" "$VIDEODB"
+		fi
+	fi
+
+	# select at random a video to play from the day or night pools
+	RandomLine "$VIDEODB"
+	[ -n "$TESTME" ] && echo 'Test override' && OUT="$TESTME"
+	CHOICE="$OUT"
+	[ -z "$CHOICE" ] && Throw "No choice in $VIDEODB"
+}
+
+VideoDescription()
+ {
+	# Look up some key terms to create a video decription
+	#	If video filename (lower cased) matches before ':',
+	#	show string after ':' instead of file name
+	local	line k v name
+	local	vd='
+Greg_Kerr:? Means a guess - have not verified
+
+b2-2:Kamehameha Childhood Hideout?
+b2-4:San Francisco Dawn
+b4-3:Golden Gate Bridge from San Francisco
+396B_1105:Somewhere in Italy?
+401c_1037:Ireland and Britain by Night from ISS?
+
+CH_C007_C011:China West of Xi`an?
+DB_D001_C005:Dubai Harbor?
+LA_A006_C008:LAX
+MEX_A006_C008:Republicans meeting in Mexico?
+PA_A010_C007:Democarats meeting in PA?
+TH_804_A001:Thailand (aka Paradise) Undersea?
+
+1223LV_FL:Maybe Chicago?
+GMT026:Korea and Japan at Night from Space?
+GMT110:Aurora Antarctica
+GMT312:Africa at Night from Space?
+
+arthursseat:Arthur`s Seat, Edinburgh, UK
+big-sur:Big Sur, California
+hampstead:London, UK from Hampstead
+northstrip:Las Vegas Strip (North)
+pecos_fog:Foggy Pecos, Texas, US
+portland:Portland, Oregon, US
+'
+	ToLower "$1"; name="$OUT"
+	OUT=$(echo "$vd" | while read line; do if [ -n "$line" ]; then
+		v="${line#*:}"
+		ToLower "${line%%:*}"; k="$OUT"
+		[ "${name#*$k}" != "$name" ] && echo "$v"
+	fi; done)
+	[ -z "$OUT" ] && OUT="${1%-???????????}"	# Drop 11c youtube code for youtube-dl videos
+ }
+
+ToLower()
+ {
+#	[ -n "$BASH_VERSINFO" ] && [ $BASH_VERSINFO -gt 3 ] && OUT="${1,,*}" && return
+	OUT=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+ }
+
+Subtitles()
+ {
+	local	t u n s f c g
+
+	f="+%H:%M, %A, %d. %B"
+	case "$OS_TYPE" in
+	  'FreeBSD')	c='-v+'	;;	# FreeBSD Date increment
+	  *)			c='-d@'	;;	# NetBSD/Linux Date format at seconds
+	esac
+	t=0; n=1
+	s=$(date +%s)
+	while [ $n -lt $SUBREPEATS ]; do	# 33 * SUBINTERVAL minutes worth of messages
+		u="${t}"
+		[ ${#u} -eq 1 ] && u="0$u"
+		[ "${c%@}" = "$c" ] && g="${c}${t}M" || g="${c}${s}"
+		g=$(date "$g" "$f")
+		echo "$n
+00:$u:03,142 --> 00:$u:09,067
+$g
+$1
+"
+		t=$(($t + $SUBINTERVAL))
+		n=$((1 + $n))	# In case some joker makes SUBINTERVAL 0
+		s=$((60 * $SUBINTERVAL + $s))
+	done
+	# Dbg "Date Parameters: [$g][$f]"
+ }
+
+Abort()
+ {
+	local	mpid
+	if [ $MPID -ne 0 ]; then
+		mpid="$MPID"
+		MPID=0
+		echo "Abort: $mpid" >> /tmp/aerialist.$USER.log
+		kill $mpid
+		mv -f "$lockf" "${lockf}.old"
+		exit 66
+	else
+		echo "Lost player" >> /tmp/aerialist.$USER.log
+		cat "$lockf" >> /tmp/aerialist.$USER.log
+	fi
+ }
+
+trap Abort TERM INT HUP
+
+# Until we are killed...
+while [ 9 -eq 9 ]; do
+	ChooseVideo
+
+	# Create SUBTITLE blurp at 0,5,10,15 minutes
+	if [ "$CHOICE" = "${CHOICE#*:}" ]; then				# Offline (vs AppleTV)?
+		st="${CHOICE##*/}";	st="${st%%.*}";	st="${st%%-*}"	# Default title - drop extension, youtube ID
+	else
+		tod="${CHOICE%%:*}";	CHOICE="${CHOICE#*:}"	#	day/night/unk
+		st="${CHOICE%%:*}";		CHOICE="${CHOICE#*:}"	#	Apple Description
+		k2s="${CHOICE%%:*}";	CHOICE="${CHOICE#*:}"	#	2k SDR
+		k2h="${CHOICE%%:*}";	CHOICE="${CHOICE#*:}"	#	2k HDR
+		k4s="${CHOICE%%:*}";	CHOICE="${CHOICE#*:}"	#	4k SDR
+		k4h="${CHOICE%%:*}";
+		CHOICE="$k2s"
+		case "$ONLINE4K$ONLINEHDR" in
+		  '01')	[ -n "$k2h" ] && CHOICE="$k2h"	;;		# Could we get display size / HDR ability somehow to auto decide?
+		  '10') [ -n "$k4s" ] && CHOICE="$k4s"	;;
+		  '11') [ -n "$k4h" ] && CHOICE="$k4h"	;;
+		esac
+		CHOICE="${ONLINETPT}:${CHOICE}"
+
+		if [ "$CACHE" -ne 0 ]; then
+			f="${CHOICE##*/}"
+			[ $TEST -ne 0 -a ! -s "$MOVIES$f" ] && Msg "Cache ON, press return to download to $f in background" && read line
+			[ -s "$MOVIES$f" ] && CHOICE="$MOVIES$f" && Dbg "Using Cache"
+			[ -s "$MOVIES$f" ] || curl -o "$MOVIES$f" "$CHOICE" >/dev/null 2>&1 &	# Sleeping and waiting did not work when tested
+		fi
+	fi
+
+	VideoDescription "$st"; st="$OUT"					# Allow for overriding file name / Apple description
+	Subtitles "$st" > "$SUBTITLE"
+
+	[ -z "$SOUND" -o "$SOUND" = '0' ] && snd='-nosound' || snd="-volume $SOUND"
+
+	if [ $TEST -ne 0 ]; then
+		head -n 5 "$SUBTITLE"
+		echo "Choice:	$CHOICE"
+		[ "$CHOICE" = "${CHOICE#*:}" ] && ls -lh "$CHOICE"
+		echo '
+Press return to play'
+		echo "Command: mplayer $snd -nolirc $WINDOWID -fs \"$CHOICE\" -sub \"$SUBTITLE\" -panscan $PANSCAN"
+		echo 'Press q during playback to exit'
+		read line
+		mplayer $snd -nolirc $WINDOWID -fs "$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN"
+		exit 1
+	elif [ -s "$CHOICE" ]; then
+		# file is on filesystem so just play it
+		echo "Local: $CHOICE" > /tmp/aerialist.$USER.out
+		mplayer $snd -really-quiet -nolirc -nostop-xscreensaver $WINDOWID -fs "$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN" >> /tmp/aerialist.$USER.out 2>&1 &
+	    MPID=$!
+	elif [ $ONLINE -ne 0 ]; then
+		# no file on filesystem so try to stream it
+		echo "Streaming: $CHOICE" > /tmp/aerialist.$USER.out
+		mplayer $snd -really-quiet -nolirc -nostop-xscreensaver $WINDOWID -fs "$ONLINEURL/$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN" >> /tmp/aerialist.$USER.out 2>&1  &
+		MPID=$!
+	else
+		echo "*** $MOVIES is empty and ONLINE is off ***"
+		exit 99
+	fi
+	echo "$MPID" >> "$lockf"
+	wait $MPID
+	err=$?
+	sleep 3	# Sometimes PID hangs around after death
+	[ $err -gt 128 ] && { echo "Killing: $MPID" >> "/tmp/aerialist.$USER.out"; kill $MPID ; exit 121; }
+done
