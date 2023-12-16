@@ -1,7 +1,7 @@
 #!/bin/sh
 #############################################################################
-gDate=231217
-gVers=010
+gDate=231218
+gVers=011
 #############################################################################
 #	Aerialist 1.10
 #
@@ -32,29 +32,6 @@ gVers=010
 #
 #	Call with 'online' to force streaming AppleTV
 #
-#	* Notes
-#	Video descriptions incomplete - could not find a table of them online
-#		(See VideoDescription function below)
-#
-#	History
-#	010	GLK	231217	Install can over-install, create .xscreensavaer (untested)., Offer to DL videos at install
-#	009	GLK	231216	Resume movies where screensaver was interrupted (for long youtube videos)
-#	008	GLK	231215	Download YT videos into AERIAL/SEASON folder if not populated but requested
-#	007	GLK	231214	Tear up night/day ... just use seasons, Apple video integration
-#	006	GLK	231212	Support youtube-dl videos with .webm, .mp4, .mkv, sound option in STABLE
-#	005	GLK	231211	In support of christmas (Fireplace videos), allow "Aerial" itself to be changed (SEASON)
-#	004	GLK	231210	panscan parameter per AUR
-#	003	GLK	231113	Test/fix on NetBSD and 'install'
-#	002	GLK	231112	Lock (workaround some leftovers detected), ONLINE option
-#	001	GLK	231105	Partial rewrite
-#
-#	Changes to original (became almost a rewrite save for a few lines
-#	If $MOVIES folder exists, find videos instead of predefined lists
-#		(still used for streaming mode)
-#	BSD (bourne/dash rewrite) compatible
-#
-#	Tested:		on Artix, Void, PopOS, FreeBSD
-#	Requires:	mplayer, awk (install), sed, grep & friends, youtube-dl, curl
 #############################################################################
 #																			#
 #			Global Parameters												#
@@ -675,11 +652,13 @@ SetStoppedAt()
 			t=$((OUT + $s))	# Played before + played now
 		fi
 		echo "$t:${CHOICE##*/}" > "${STATEDB}.new"
-		while read line; do
-			[ "${line##*:}" != "${CHOICE##*/}" ] && echo "$line" >> "${STATEDB}.new"
-		done < "$STATEDB"
-		[ -e "$STATEDB" ] && mv -f "${STATEDB}" "${STATEDB}.old"
-		mv "${STATEDB}.new" "${STATEDB}"
+		if [ -s "$STATEDB" ]; then
+			while read line; do
+				[ "${line##*:}" != "${CHOICE##*/}" ] && echo "$line" >> "${STATEDB}.new"
+			done < "$STATEDB"
+			cp"${STATEDB}" "${STATEDB}.old"
+		fi
+		cp "${STATEDB}.new" "${STATEDB}"
 		rm -f "${STATEDB}.old"
 		OUT="$t"
 	fi
@@ -822,3 +801,27 @@ Press return to play'
 	sleep 3	# Sometimes PID hangs around after death
 	[ $err -gt 128 ] && { Log "Killing: $MPID"; kill $MPID ; exit 121; }
 done
+
+#############################################################################
+#	* Notes
+#	Video descriptions incomplete - could not find a table of them online
+#		(See VideoDescription function below)
+#
+#	History
+#	011	GLK	231218	Move History here ... makes more sense
+#	010	GLK	231217	Install can over-install, create .xscreensavaer (untested)., Offer to DL videos at install
+#	009	GLK	231216	Resume movies where screensaver was interrupted (for long youtube videos)
+#	008	GLK	231215	Download YT videos into AERIAL/SEASON folder if not populated but requested
+#	007	GLK	231214	Tear up night/day ... just use seasons, Apple video integration
+#	006	GLK	231212	Support youtube-dl videos with .webm, .mp4, .mkv, sound option in STABLE
+#	005	GLK	231211	In support of christmas (Fireplace videos), allow "Aerial" itself to be changed (SEASON)
+#	004	GLK	231210	panscan parameter per AUR
+#	003	GLK	231113	Test/fix on NetBSD and 'install'
+#	002	GLK	231112	Lock (workaround some leftovers detected), ONLINE option
+#	001	GLK	231105	Partial rewrite
+#
+#	BSD (bourne/dash) compatible
+#
+#	Tested:		on Artix, Void, PopOS, FreeBSD, NetBSD
+#	Requires:	mplayer, awk (install), sed, grep & friends, youtube-dl, curl
+#############################################################################
