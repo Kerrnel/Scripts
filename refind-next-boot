@@ -2,25 +2,40 @@
 # Need bash for substrings
 
 #
-# Set Refind's previous booted item variable (for next boot if it is set to boot previous)
+#	Get/Set Refind's previous booted item variable (for next boot if it is set to boot previous)
 #
 
 #	Usage
 #	$0 [ChoiceOfBoot] [Volume for Choice]
 
 #	History
+#	004	GLK	231207	EFIPATHS - find multiple, handle none
+#	003	GLK	231018	Latest version of RefindPlus seems to write "Load Manual Stanza: CTO Popos" for a manual boot
+#	002	GLK	230621	Big redo with cleaner parsing (used grep on *.conf before)
 #	001	GLK	221211	Support volume and Boot X from Y format of the variable that seems to be in use
 #
 
-REFINDPATH='/boot/efi/EFI/Refind'
-EFIGUID='36d08fa7-cf0b-42f5-8f14-68df73ed3740'
-EFIVAR="${EFIGUID}-PreviousBoot"
-EFIPATH="/sys/firmware/efi/efivars/PreviousBoot-${EFIGUID}"
+### SETUP
+[ $(id -u) -eq 0 ] && SUDO='' || SUDO='sudo'
+
+# Temp Files
 EFITMP='/tmp/refind.efivar'
 EFIBAK='/tmp/refound.efivar'
-LOG='/tmp/rnb.log'
+LOG="/tmp/rnb.$(id -un).log"
+DEBUG=0		# Level of verbosity
 
-Error()
+Log()
+ {
+	# Show & log a message
+	echo "$@" | while read line; do
+		echo "$(date +%y%m%d.%H:%M:%S)		$line" | tee -a "$LOG" >&2
+	done
+ }
+
+Err()	{ Log "*** $@";	}
+Dbg()	{ [ $DEBUG -ge $1 ] && shift && Log "+++ $@";	}
+
+Throw()
  {
 	# Show error, quit
 	Log '***'
@@ -29,12 +44,126 @@ Error()
 	exit 1
  }
 
-Log()
- {
-	# Show & log a message
-	echo "$@" | while read line; do
-		echo "	$(date +%y%m%d.%H:%M:%S)  $line" | tee -a "$LOG" >&2
+# Find EFI folders
+for i in /*/*/'EFI'; do if [ -d "$i" ]; then
+	i=$(cd "$i"; pwd -P)
+	e="${EFIPATHS#:}"
+	while [ -n "$e" ]; do
+		[ "$i" = "${e%%:*}" ] && i=''
+		[ "$e" = "${e%%:*}" ] && e='' || e="${e#*:}"	
 	done
+	if [ -n "$i" ]; then
+		Log "Found:		$i"
+		EFIPATHS="${EFIPATHS}:$i"
+	fi
+fi; done
+EFIPATHS="${EFIPATHS#:}"
+if [ -z "$EFIPATHS" ]; then
+	$SUDO mount '/boot/efi'
+	[ -d '/boot/efi/EFI' ] && EFIPATHS='/boot/efi/EFI' || Throw 'Could not find or mount /boot/efi to find an EFI folder'
+fi
+
+### MAIN
+REFINDPATH="${i%/refind.conf}"				# These will be recalculated in DoEfiFolder
+REFINDVARS="${REFINDPATH}/vars"
+RFVPATH="${REFINDVARS}/PreviousBoot"
+REFINDPLUS=0
+
+# Static
+BOOTGUID='36d08fa7-cf0b-42f5-8f14-68df73ed3740'
+EFIVAR="${BOOTGUID}-PreviousBoot"
+NVRPATH="/sys/firmware/efi/efivars/PreviousBoot-${BOOTGUID}"
+
+
+# Globals
+NVRAM=''
+PREVIOUS=''
+
+# Parameters
+NEWCHOICE="$1"
+NEWVOL="$2"
+
+
+GetFsSize()
+ {
+	case $(uname -s) in
+	  Linux)	stat -c %s "$1"	;;
+	  *)		stat -f %z "$1"	;;
+	esac
+ }
+
+GetPreviousBoot()
+ {
+	# Set NVRAM, PREVIOUS to reading of previous booted choice
+	NVRAM=$(ReadProperty '*' 'use_nvram')
+
+	case "$NVRAM" in
+	  'true')
+		if [ -e "$NVRPATH" ]; then
+			PREVIOUS=$(Utf16to8 "$NVRPATH" 4)
+		elif which efivar >/dev/null 2>&1; then
+			PREVIOUS=$(efivar -n "$EFIVAR")
+		fi
+	  ;;
+	  'false')
+		[ -e "$RFVPATH" ] && PREVIOUS=$(Utf16to8 "$RFVPATH")
+	  ;;
+	esac
+	[ -z "$PREVIOUS" ] && PREVIOUS=$(ReadProperty '*' 'default_selection')
+ }
+
+SetPreviousBoot()
+ {
+	local	n choice a
+
+	choice="$1"
+
+	[ -e "$EFIBAK" ] && rm "$EFIBAK"
+	[ -e "$EFITMP" ] && rm "$EFITMP"
+
+	case "$NVRAM" in
+	  'true')
+		Log "Copying $NVRPATH to $EFIBAK, writing $choice"
+		cp "$NVRPATH" "$EFIBAK"
+
+		# Create new var - presume it starts with 07 00 00 00 'Boot ' (4 + 10) - this may be wrong and only in efivarfs representation
+		# dd bs=1 if="$EFIBAK" of="$EFITMP" count=4 2>/dev/null
+		# n=4
+		n=0
+
+		Utf8to16 "$choice" "$EFITMP"
+		n=$((${#choice} * 2 + $n))
+
+		dd bs=1 if=/dev/zero of="$EFITMP" seek=$n count=2  2>/dev/null	# Wide Null terminated
+		n=$((2 + $n))
+
+		Log "Created $EFITMP with length $n, writing back"
+		# dd bs=1 if="$EFITMP" of="$NVRPATH" 2>/dev/null - fails
+		if ! $SUDO efivar -f "$EFITMP" -n "$EFIVAR" -w; then
+			Log "Error $? doing: efivar -f "$EFITMP" -n "$EFIVAR" -w"
+			Log "Retry without immutable flag: $NVRPATH"
+			$SUDO chattr -i "$NVRPATH"
+			cat "$EFITMP" | sudo tee "$NVRPATH" > /dev/null
+		fi
+	  ;;
+
+	  'false')
+		Utf8to16 "${choice}" "$EFIBAK"	# Space for 0 terminator made by LF at end?
+		n=$((${#choice} * 2))	# 8 to 16
+		if [ -e "$RFVPATH" ]; then
+			a=$(GetFsSize "$RFVPATH")
+			if [ $a -gt $n ]; then
+				cp "$RFVPATH" "$EFITMP"
+				dd bs=1 if="$EFIBAK" of="$EFITMP" count=$n 2>/dev/null
+			fi
+		fi
+		[ ! -e "$EFITMP" ] && cp "$EFIBAK" "$EFITMP"
+		dd bs=1 if=/dev/zero of="$EFITMP" count=2 seek=$n 2>/dev/null	# Wide Null terminated
+		$SUDO cp "$EFITMP" "$RFVPATH"
+	  ;;
+
+	  *)	Throw 'NVRAM Bogon'	;;
+	esac
  }
 
 IsIn()
@@ -46,111 +175,212 @@ IsIn()
 	return 1
  }
 
-VolForEntry()
+EntryParse()
  {
-	local	line menu
-	while read line; do
-		line="${line%%#*}"
-		case "$line" in
+	# Get field(s) from MenuEntry $1 name $2
+	# ... or globally if $1 is '*'
+	# ... or MenuEntry names if $1 is blank
+	local	line a subMenu
+	local	depth=0
+	local	e="$1"
+	local	p="$2"
+
+	[ -z "$p" ] && p=' No Match '
+
+	while read a line; do if [ -n "$a" ]; then
+		Dbg 5 "InL: [$a][$subMenu][$depth][$e]"
+		case "$a" in
 		  [Mm][Ee][Nn][Uu][Ee][Nn][Tt][Rr][Yy]*)
-			line="${line#* }"
-			line="${line% \{*}"
-			line="${line%\{*}"
+			Dbg 3 "$a ($line)"
+			line="${line%%{*}"
+			line="${line% *}"
 			if [ "$line" != "$line#*\"" ]; then	# Quoted
 				line="${line#*\"}"
-				line="${line%\"*}"
+				subMenu="${line%\"*}"
+			else
+				subMenu="$line"
 			fi
-			while [ "$line" != "${line% }" ]; do line="${line% }"; done
-			while [ "$line" != "${line# }" ]; do line="${line# }"; done
-		  	menu="${line}"
+			depth=1
 		  ;;
-		  *[Vv][Oo][Ll][Uu][Mm][Ee]*)
-			line="${line#*[Vv][Oo][Ll][Uu][Mm][Ee]}"
-			if [ "$line" != "$line#*\"" ]; then	# Quoted
-				line="${line#*\"}"
-				line="${line%\"*}"
+
+		  [Ss][Uu][Bb][Mm][Ee][Nn][Uu][Ee][Nn][Tt][Rr][Yy]*)	depth=2			;;
+		  'include')	EntryFromConf "$REFINDPATH/$line" "$e" "$p"				;;
+		  'disabled')	[ $depth -eq 1 ] && subMenu=''							;;
+
+		  "$p")
+			line="${line%\"}"
+			line="${line#\"}"
+			[ "$subMenu" = "$e" -a $depth -eq 1 ] && echo "$line" && Dbg 1 "OuS: [$line][$e]"
+			[ "$e" = '*' -a $depth -eq 0 ] && echo "$line" && Dbg 1 "OuT: [$line][$a]"
+		  ;;	# Read property?
+
+		  '}')
+			if [ $depth -gt 1 ]; then
+				depth=1
+			else
+				[ -n "$subMenu" -a -z "$e" ] && echo "$subMenu" && subMenu=''
 			fi
-			# echo "${menu}:${line}"
-			while [ "$line" != "${line% }" ]; do line="${line% }"; done
-			while [ "$line" != "${line# }" ]; do line="${line# }"; done
-			[ "$menu" = "$1" ] && echo "$line" && menu=''
 		  ;;
 		esac
-	done
+	fi; done
  }
 
-VolFor()
+EntryFromConf()	{	Dbg 2 "EFC: [$1][$2][$3]"; cat "$1" | sed -e 's/#.*//' | EntryParse "$2" "$3";		}
+ReadEntries()	{	EntryFromConf "$REFINDPATH/refind.conf" "$1" "$2";						}
+ReadProperty()	{	Dbg 1 "RdP: $@"; ReadEntries "$@" | tail -n 1;											}
+
+Utf8to16()
  {
-	local line
-	while read line; do
-		cat "$line" | VolForEntry "$1"
-	done
- }
+	# Append utf8 string $1 to utf16 file $2
+	local	n s u f
 
-VolForChoice()
- {
-	grep -l -i "^MenuEntry.*$1" "$REFINDPATH"/*.conf | VolFor "$1" | head -n 1
- }
-
-[ -e "$EFIPATH" ] || Error "No $EFIPATH entry exists"
-efivar -n "$EFIVAR"
-
-[ -z "$1" ] && Log "Choose from:"
-
-list=$(grep -i '^MenuEntry' "$REFINDPATH"/*.conf | sed -e 's/^[^ ]*[ ]//' | sed -e 's/ {.*//' | while read line; do
-	if [ "$line" != "$line#*\"" ]; then	# Quoted
-		line="${line#*\"}"
-		echo "[${line%\"*}]"
-	else
-		echo "[$line]"
-	fi
-done)
-
-# Log "$list"
-echo "$list" | while read line; do
-	line="${line#[}"
-	line="${line%]}"
-	vol=$(VolForChoice "$line")
-	[ -n "$vol" ] && Log "[$line] : [from $vol]" || Log "[$line]"
-done
-
-choice="$1"
-vol="$2"
-if [ -n "$choice" ]; then
-	echo "$list" | IsIn "[$1]"
-	err=$?
-	[ $err -eq 0 ] && Log "Found $choice as a menu entry" || Log "Using $choice as a partial match"
-
-	[ -z "$vol" ] && vol=$(VolForChoice "$choice")
-	choice="Boot ${choice}"	# Seems to be what Refind stores
-	[ -n "$vol" ] && choice="${choice} from ${vol}"
-
-	Log "Copying $EFIPATH to $EFIBAK"
-	cp "$EFIPATH" "$EFIBAK"
-
-	# Create new var - presume it starts with 07 00 00 00 'Boot ' (4 + 10)
-	dd bs=1 if="$EFIBAK" of="$EFITMP" count=4 2>/dev/null
-	n=4
-
-	rm "$EFITMP"; touch "$EFITMP"
 	n=0
-
 	s=0
-	while [ $s -lt ${#choice} ]; do
-		# Log "Get character #$s from $choice"
-		echo "${choice:$s:1}" >> "$EFITMP"
-		n=$((1 + $n))
-		s=$((1 + $s))
-		# Write a 0 to make UTF-16 out of ASCII
-		dd bs=1 if="$EFIBAK" of="$EFITMP" skip=1 seek=$n count=1  2>/dev/null
-		n=$((1 + $n))
+	u="$1"
+	f="$2"
+
+	if which 'iconv' >/dev/null 2>&1; then
+		echo "$u" | iconv -f UTF8 -t UTF16LE >> "$f"
+		# Log $(hexdump -C "$f")
+	else
+		while [ $s -lt ${#u} ]; do
+			# Log "Get character #$s from $u"
+			echo "${u:$s:1}" >> "$f"
+			n=$((1 + $n))
+			s=$((1 + $s))
+			# Write a 0 to make UTF-16 out of ASCII
+			dd bs=1 if='/dev/zero' of="$f" count=1 seek=$n 2>/dev/null
+			n=$((1 + $n))
+		done
+	fi
+ }
+
+Utf16to8()
+ {
+	# Read the first null terminated UTF-16 string from a file in $1 (starting at byte $2 if present)
+	local line done
+	out=0
+	if [ -n "$2" ]; then
+		dd bs=1 skip=$2 if="$1" 2>/dev/null | iconv -f UTF16LE -t UTF8 | xargs --null -n 1 | while read line; do
+			[ $out -eq 0 ] && echo "$line" && out=1
+		done
+	else
+		iconv -f UTF16LE -t UTF8 "$1" | xargs --null -n 1 | while read line; do
+			[ $out -eq 0 ] && echo "$line" && out=1
+		done
+	fi
+ }
+
+### Start
+DoRefindConf()
+ {
+	local choice vol
+
+	vol="$NEWVOL"
+
+	DEFAULT=$(ReadProperty '*' 'default_selection')
+	DEFPREV="${DEFAULT%%,*}"
+	GetPreviousBoot
+
+	Log "Previous:	$PREVIOUS"
+	Log "Default:	$DEFAULT"
+	Log "NVRAM:		$NVRAM ($REFINDPLUS)"
+
+	[ "$DEFPREV" != '+' ] && Err "NOT SET TO BOOT PREVIOUS ($DEFAULT)" && return 11
+	[ "$NVRAM" = 'false' -o -e "$NVRPATH" ] || Log "*** Note: $NVRPATH missing even though use_nvram is true"
+	[ "$NVRAM" = 'true' -o -e "$RFVPATH" ] || Log "*** Note: $RFVPATH missing even though use_nvram is false"
+
+	[ -z "$NEWCHOICE" ] && Log "Choose from:"
+
+	list=$(ReadEntries)
+
+	echo "$list" | while read line; do
+		line="${line#[}"
+		line="${line%]}"
+		vol=$(ReadProperty "$line" 'volume')
+		[ -n "$vol" ] && Log "[$line] : [from $vol]" || Log "[$line]"
 	done
 
-	dd bs=1 if="$EFIBAK" of="$EFITMP" skip=1 seek=$n count=2  2>/dev/null
-	n=$((2 + $n))
+	if [ -n "$NEWCHOICE" ]; then
+		echo "$list" | IsIn "$NEWCHOICE"
+		err=$?
 
-	Log "Created $EFITMP with length $n, writing back"
-	# dd bs=1 if="$EFITMP" of="$EFIPATH" 2>/dev/null - fails
-	sudo efivar -f "$EFITMP" -n "$EFIVAR" -w
-	efivar -n "$EFIVAR"
-fi
+		if [ $err -ne 0 ]; then
+			Log "Using $NEWCHOICE as a partial match"
+			[ -z "$vol" ] && vol=$(ReadProperty "$NEWCHOICE" 'volume')
+			choice="Boot ${NEWCHOICE}"					# Seems to be what Refind stores
+			[ -n "$vol" ] && choice="${choice} from ${vol}"
+		else
+			Log "Found $NEWCHOICE as a menu entry"
+			if [ $REFINDPLUS -ne 0 ]; then
+				choice="Load Manual Stanza: ${NEWCHOICE}"	# Seems to be what RefindPlus stores in 2023
+			else
+				choice="Boot ${NEWCHOICE}"	# Seems to be what RefindPlus stores in 2023
+				[ -n "$vol" ] && choice="${choice} from ${vol}"
+			fi
+		fi
+
+		SetPreviousBoot "$choice"
+		GetPreviousBoot
+		Log "New Boot:	$PREVIOUS"
+	else
+		Log "Retaining: $PREVIOUS"
+	fi
+ }
+
+DoEfiFolder()
+ {
+	local	i found
+
+	found=0
+
+	for i in "$1"/*/'refind.conf'; do if [ -e "$i" ]; then
+		found=1
+		REFINDPATH="${i%/refind.conf}"
+		REFINDVARS="${REFINDPATH}/vars"
+		RFVPATH="${REFINDVARS}/PreviousBoot"
+		[ -e "${REFINDPATH}/RefindPlus.efi" ] && REFINDPLUS=1 || REFINDPLUS=0
+		Log "__"
+		Log ">>> Processing Refind: $i"
+		DoRefindConf "$EFIPATH"
+	fi; done
+
+	[ $found -eq 1 ] || Err "No Refind folder found in $1"
+ }
+
+EfiNext()
+ {
+	local bnext bnow bt
+
+	if which 'efibootmgr' >/dev/null 2>&1; then
+		efibootmgr -v | tr '\\' '/' | while read line; do case "$line" in
+		  'BootNext:'*)		bnext="${line#*: }"	;;
+		  'BootCurrent:'*)	bnow="${line#*: }"	;;
+		  'Boot'*)
+			bt="${line#Boot}"
+			bt="${bt%%[ *]*}"
+			if [ \( -z "$bnext" -a "$bnow" = "$bt" \) -o \( -n "$bnext" -a "$bnext" = "$bt" \) ]; then
+				line="${line#*File(}"
+				line="${line%%)*}"		# Probably with backslashes (tr above)
+				echo "$bt:$line"
+			fi
+		  ;;
+		esac; done
+	fi
+ }
+
+# Show EfiNext
+EFINEXT=$(EfiNext)
+[ -z "$EFINEXT" ] && EFINEXT='Unsupported OS detection'
+Log	"UEFI boot:	$EFINEXT"
+
+# Do all EFI paths found
+Log "Read with:	efivar -n $EFIVAR"
+
+while [ -n "$EFIPATHS" ]; do
+	Log '___'
+	EFIPATH="${EFIPATHS%%:*}"
+	[ "$EFIPATH" = "$EFIPATHS" ] && EFIPATHS='' || EFIPATHS="${EFIPATHS#*:}"
+	Log ">> Processing EFI: $EFIPATH ($EFIPATHS)"
+	DoEfiFolder "$EFIPATH"
+done
