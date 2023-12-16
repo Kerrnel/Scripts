@@ -1,7 +1,7 @@
 #!/bin/sh
 #############################################################################
-gDate=231214
-gVers=007
+gDate=231216
+gVers=009
 #############################################################################
 #	Aerialist 1.07
 #
@@ -22,8 +22,10 @@ gVers=007
 #		(See VideoDescription function below)
 #
 #	History
+#	009	GLK	231216	Resume movies where screensaver was interrupted (for long youtube videos)
+#	008	GLK	231215	Download YT videos into AERIAL/SEASON folder if not populated but requested
 #	007	GLK	231214	Tear up night/day ... just use seasons, Apple video integration
-#	006	GLK	231212	Support youtube-dl videos with .webm, .mp4, .mkv, sound option in SEASONS
+#	006	GLK	231212	Support youtube-dl videos with .webm, .mp4, .mkv, sound option in STABLE
 #	005	GLK	231211	In support of christmas (Fireplace videos), allow "Aerial" itself to be changed (SEASON)
 #	004	GLK	231210	panscan parameter per AUR
 #	003	GLK	231113	Test/fix on NetBSD and 'install'
@@ -38,32 +40,37 @@ gVers=007
 #	Tested:		on Artix, Void, PopOS, FreeBSD
 #	Requires:	mplayer, awk (install), sed, grep & friends, youtube-dl, curl
 #############################################################################
-#					Parameters												#
+#																			#
+#			Global Parameters												#
+#																			#
 # Options - override in ~/.config/aerialist with shell format script
 ONLINE=1					# Allow network video play - set to 2 to FORCE online
 ONLINE4K=0					# Online 4K option (vs 2K if available)
 ONLINEHDR=0					# Online HDR option (vs SDR if available)
 ONLINETPT='http'			# Transport to get online assets
-CACHE=1						# Download Online videos to MOVIES folder
+CACHE=1						# Download Online videos to AERIAL folder (Apple, YouTube sources)
 TEST=0						# Just show the video that would play
-SUBINTERVAL=3				# Description every this many minutes
-SUBREPEATS=33				# Number of times to repeat @ SUBINTERVAL
-MOVIES=~/Videos/Aerialist	# Master Path of MOVIES folders (required if ONLINE == 0)
+SUBINTERVAL=2				# Description every this many minutes
+SUBREPEATS=55				# Number of times to repeat @ SUBINTERVAL
+AERIAL=~/Videos/Aerialist	# Master Path of MOVIES folders (required if ONLINE == 0)
 PANSCAN=1.0					# Crop 16:9 movies - set to 0 to not do it
-SEASON='Aerial'				# Switch preferences and everything associated with 
+SEASON='Apple'				# The collection of videos under AERIAL that we will use
 SOUND=0						# 0-100 audio volume, set in ~/.config/aerial if you wish videos with sound
+RESUME=1					# Resume video playback from last position when interrupted
 
 # December Fireplace?
-# Format - Weekday M-D-Begin M-D-End 24HourBeg 24HourEnd Selection AudioVolume
-SEASONS='
+# Format - Weekday (can be multiple) MonthDay-Begin M-D-End 24HourBeg 24HourEnd Selection AudioVolume
+STABLE='
 	*	12-1	2-14	19	7	22	Fireplace
 	*	*		*		19	7	11	Night
-	*	*		*		12	19	9	Places
+	135	*		*		*	*	11	Animals
+	*	*		*		9	17	9	Places
+	*	*		*		17	20	1	Sports
 	*	*		*		*	*	11	Apple
 '
 ############################################################################
 
-# Global
+# Globals
 MPID=0				# MPlayer pid
 TESTME=''			# Fake a selection with test XYZ (use 'test' 'VideoPath')
 
@@ -71,6 +78,7 @@ TESTME=''			# Fake a selection with test XYZ (use 'test' 'VideoPath')
 OS_TYPE=$(uname -s)
 USER=$(id -un)
 UID=$(id -u)
+LOGF="/tmp/aerialist.$USER.log"
 
 # XDG
 [ -z "$XDG_CONFIG_HOME" ] && XDG_CONFIG_HOME=~/'.config'
@@ -83,32 +91,36 @@ UID=$(id -u)
 	mkdir -p "$XDG_RUNTIME_DIR"
  }
 
-# Allow preferences override in .config/aerialist
+# Allow defaults override in .config/aerialist
 [ -e "$XDG_CONFIG_HOME/aerialist" ] && . "$XDG_CONFIG_HOME/aerialist"
+
+# If RESUME != 0
+STATEDB="$XDG_CONFIG_HOME/aerialist-state"
 
 # Are we inside xscreensaver?
 [ -n "$XSCREENSAVER_WINDOW" ] && WINDOWID="-wid $XSCREENSAVER_WINDOW" || TEST=1
 
-Msg()	{	echo "$(date +%k:%M:%S)	$@" >&2;			}
+Msg()	{	echo "$(date +%k:%M:%S)	$@" >&2;		}
+Log()	{	Msg "$@" >> "$LOGF" 2>&1;				}
 Dbg()	{	[ $TEST -ne 0 ] && Msg "+++ [$@] +++";	}
-Err()	{	Msg "*** [$@] ***";							}
-Throw()	{	Err "$@"; exit 44;							}
+Err()	{	Msg "*** [$@] ***";						}
+Throw()	{	Err "$@"; exit 44;						}
 
 SeasonMatch()
  {
 	# Process SEASON table (on stdin) and echo firast matched Season - or $1 if no match
 	local	d m w H M pw pdb pde phb phe pS pmb pme egb snd
 
-	M=$(date "+%d %m %w %H %M")
+	M=$(date "+%d %m %w %H %M");	Dbg "Season Match: $M"
 	d="${M%% *}";	M="${M#* }"
 	m="${M%% *}";	M="${M#* }"
 	w="${M%% *}";	M="${M#* }"
 	H="${M%% *}";	M="${M#* }";	H="${H#0}";	M="${M#0}"
 
 	while read pw pdb pde phb phe snd pS; do if [ -n "$pw" ]; then
-		# Dbg "Season?: [$pw][$pdb[$pde][$phb][$phe][$pS][$d/$m/$w/$H/$M]" >&2
+		Dbg "Season?: [$pw][$pdb[$pde][$phb][$phe][$pS][$d/$m/$w/$H/$M]" >&2
 		# * Matches anything
-		if [ "$pw" = '*' -o "$pw" = "$w" ]; then
+		if [ "$pw" = '*' -o "${pw#*$w}" != "$pw" ]; then	# Weekday is all or contains today (0-6)
 			pmb="${pdb%-*}";	pdb="${pdb#*-}"
 			pme="${pde%-*}";	pde="${pde#*-}"
 			# echo "Season-: [$pmb[$pme][$pdb][$pde]" >&2
@@ -141,15 +153,16 @@ SeasonMatch()
 SourceSet()
  {
 	local i
+
 	# Some alternative locations for MOVIES if it not a directory - or chosen based on Season election
-	for i in "${MOVIES%/*}/$SEASON" ~/"Videos/Aerial/$SEASON" '/home'/*/"VIDEO/Aerial/$SEASON" ~/"Videos/$SEASON" '/home'/*/"VIDEO/$SEASON" "/SHARE/VIDEO/COLLECTION/$SEASON"; do
-		[ -d "$i" ] && MOVIES="$i"
+	for i in "${AERIAL%/*}/$SEASON" ~/"Videos/Aerial/$SEASON" '/home'/*/"VIDEO/Aerial/$SEASON" ~/"Videos/$SEASON" '/home'/*/"VIDEO/$SEASON" "/SHARE/VIDEO/COLLECTION/$SEASON"; do
+		[ -d "$i" ] && MOVIES="$i" && Dbg "Selected movies: $i"
 	done
 
-	# Need a cache location?
-	if [ $ONLINE -ne 0 -a $CACHE -ne 0 ]; then
-		[ "${MOVIES##*/}" != 'Apple' ] && MOVIES="${MOVIES}/Apple"
-		[ ! -d "$MOVIES" ] && mkdir -p "$MOVIES"
+	# No folder found?
+	if [ -z "$MOVIES" ]; then
+		MOVIES="$AERIAL/$SEASON"
+		Download "$SEASON" "$MOVIES"
 	fi
 
 	# End with / for find
@@ -167,15 +180,104 @@ SeasonSet()
  {
 	# Get Season / Sound
 	if [ $ONLINE -gt 1 ]; then
-		SEASON='AppleTV'
+		SEASON='Apple'
+		Dbg 'Online forced'
 	else
-		[ -n "$SEASONS" ] && SEASON=$(echo "$SEASONS" | SeasonMatch "$SEASON")
+		[ -n "$STABLE" ] && SEASON=$(echo "$STABLE" | SeasonMatch "$SEASON")
 		SOUND="${SEASON%%:*}"
 		SEASON="${SEASON#*:}"
 	fi
 
 	Dbg "Season:	$SEASON"
 	SourceSet
+ }
+
+Download()
+ {
+	# Download a Season's content from YouTube
+	if [ "$1" = 'Apple' ]; then
+		Msg "Apple season (CACHE: $CACHE)"
+		[ $CACHE -ne 0 ] && mkdir -p "$2"
+		return 0
+	elif which 'youtube-dl' >/dev/null 2>&1 && [ $CACHE -ne 0 ]; then
+		local	ytvids v f
+
+		case "$1" in
+		  'Animals')
+			ytvids='DVTRklHhEsU Wb14e21CN5Y s7DbVTkaXn0 NyelTWkAMUE yYoWnLCvYo0'
+			ytvids="$ytvids ZPyQh7jjbpE qOXeIip16No eoTpdTU8nTA asTC8fvw0W8"
+			ytvids="$ytvids 3PXUO_7Pj5o WrBmEymjbmU Q4Ht5wd9Iec"
+		  ;;
+		  'Fireplace')
+			ytvids='v_RjruJY_EI mKCieTImjvU AWKzr6n0ea0 6j3hPg0t5fo B0j__sZXiWI RDCMUC33xiA'
+			ytvids="$ytvids paiSoYQhaBE KzmtBgqap0s wNwMnGRjgdw bmGsQkLb4yg eYy-ahKKMys"
+		  ;;
+		  'Night')
+			ytvids='B5unCXpegAw o7w1jq29oZU bCEMBU9Sk98 SiryvrStb8Ek SMKVJO_wGo'
+		  ;;
+		  'Places')
+			ytvids = $(echo "
+				CHSnz0bCaUk	#	Alaska 8K
+				YDL8HbY9ENU	#	Argentina
+				bQmzk05I3nw	#	Australia
+				o2ZxJA9CSJg	#	Bali
+				Vmx6I1vQFSs	#	Bavaria
+				hbgo66q1s9o	#	China
+				gig9-jO7YL4	#	Earth
+				0EdVsuDq28M	#	Europe
+				5MXTcO1veRQ	#	France
+				8_j64iq_hTE	#	Germany
+				mOnWayInxWc	#	Germany (Aerial)
+				rFVpSwgCkCo	#	Hawaii 8K
+				8SO273jh_LI	#	India
+				l1WWiaGEKYs	#	Ireland
+				56gZuTy6xIc	#	Italy
+				G5RpJwCJDqc	#	Japan
+				Cjl70Cqo3Q4	#	Kashmir
+				gCRNEJxDJKM	#	Nepal
+				vtxVK3sbZ0o	#	New Zealand
+				CxwJrzEdw1U	#	Norway
+				jjP12kUYUs4	#	Philippines
+				mcrByXBKHOw	#	Puerto Rico
+				mTm0WKWGpas	#	Saudi Arabia
+				qEjzVTo2eTs	#	Slovenia 8K
+				BcnfdZjfbGA	#	Sri Lanka
+				7kGfll2_vXk	#	Switzerland
+				fR1nGxW_OP4	#	Switzerland (Aerial)
+				vz7y5a-dtu4	#	Thailand
+				4Z9mUjtFJYY	#	USA
+				_K-Gtb_ywfg	#	Venezuela
+				MbXLt7OwEXI	#	Vietnam
+				Ihiy9A__QM8 #	Wonders
+				" | while read f v; do
+			  		ytvids="$ytvids $f"
+			  	done)
+		  ;;
+		  'Sports')		ytvids='wj_ZEDISBnA I6VpZ3bnnKI'	;;
+
+		  *)
+			Err "No predefined videos for $1"
+			return 1
+		  ;;
+		esac
+
+		mkdir -p "$2"
+		if [ -d "$2" ]; then
+			cd "$2"
+			for v in "$ytvids"; do
+				for f in *"${v}"*; do if [ -s "$f" ]; then
+					f="${f%.*}"
+					f="${f##*-}"
+					[ "$f" = "$v" ] && v=''
+				fi; done
+				[ -n "$v" ] && youtube-dl "$v" || Dbg "Already have: $f in $1"
+			done
+		else
+			Err "$2 could not be created to stash videos"
+		fi
+	else
+		Err "No youtube-dl + CACHE settign to populate $2 for $1"
+	fi
  }
 
 Install()
@@ -213,10 +315,10 @@ Type any parameters to add when started separated with a space:
 			cp -f "$a" "$o"
 			echo "Installing [$c] as a screensaver..."
 			if [ -s "$o" ]; then
-				cat "$o" | awk -v "PRG=$c $line" '{ print $0;
+				awk -v "PRG=$c $line" '{ print $0;
 					# Funky format of .xscreensaver prefs - why not redone in 6.0?!? ;)
 					if ("programs:" == $1) print "\t\t\"Aerialist\"\t" PRG "\t\t\t    \\n\\"
-				 }' > "$a"
+				 }' "$o" > "$a"
 				echo 'Should be installed, here is the diff:
 ------'
 				diff "$a" "$o"
@@ -229,52 +331,6 @@ Type any parameters to add when started separated with a space:
 	# Download videos?
 	exit 22
  }
-
-# Install into xscreensaver and exit, test mode (just output what would happen)
-while [ -n "$1" ]; do case "$1" in
-  'install')	Install						;;
-  'online')		ONLINE=2					;;
-  'offline')	ONLINE=0					;;
-  'sound')		SOUND=25					;;
-  'volume')		SOUND="$2"; shift			;;
-  'movies')		MOVIES="$2"; shift			;;
-  'hdr')		ONLINEHDR=1					;;
-  '4k')			ONLINE4K=1					;;
-  'test')		TEST=1; TESTME="$2"; shift	;;
-esac; shift; done
-
-# Lock for this display
-lockf="$XDG_RUNTIME_DIR/.aerialist.${DISPLAY#:}.lock"
-if [ -e "$lockf" ]; then
-	pid=$(head -n 1 "$lockf")	# aerialist
-	case "$OS_TYPE" in
-	  'Linux')	f='-h -q'	;;
-	  *)		f='-p'		;;
-	esac
-	ps $f "$pid" >/dev/null 2>&1 && echo "Aerialist locked by $pid in $lockf" && exit 33
-	pid=$(tail -n 1 "$lockf")	# mplayer
-	ps $f "$pid" >/dev/null 2>&1 && kill -9 "$pid"
-fi
-echo $$ > "$lockf"
-
-# Show info in test mode
-if [ $TEST -ne 0 ]; then
-	echo "Aerialist:		$gVers ($gDate)
-Season:		$SEASON
-Movies:		$MOVIES
-XDG Conf:	$(ls -ld $XDG_CONFIG_HOME)
-XDG Runt:	$(ls -ld $XDG_RUNTIME_DIR)
-Mplayer:	$(which mplayer)
-Curl:		$(which curl)
-Process:	$$
-Lockfile:	$lockf"
-fi
-
-
-# Plays the video - local and remote
-for i in 'mplayer' 'curl'; do
-	command -v "$i" >/dev/null 2>&1 || Throw "${0##*/} requires $i but it's not installed. Aborting."
-done
 
 Random()
  {
@@ -350,7 +406,7 @@ AppleVideoTar()
 			cd "$p"
 			curl -o 'tv.tar' "$u" 2>/dev/null
 			tar xf 'tv.tar' 'entries.json' 2>/dev/null
-			[ -s 'entries.json' ] && cat 'entries.json' | ApplePit 2>/dev/null
+			[ -s 'entries.json' ] && ApplePit < 'entries.json' 2>/dev/null
 			rm -f 'tv.tar' 'entries.json'
 			cd ..
 			rmdir "$p")
@@ -374,7 +430,7 @@ ChooseVideo()
 	# If db is empty, find all the '*.mov' videos in $MOVIES for night or day and stash in VIDEODB or NIGHT_DB
 	# Select and delete one line from VIDEODB or NIGHT_DB, store in $CHOICE
 	if [ ! -s "$VIDEODB" ]; then
-		if [ -d "$MOVIES" -a "$SEASON" != 'AppleTV' ]; then
+		if [ -d "$MOVIES" -a "$SEASON" != 'Apple' ]; then
 			Dbg "Find:	find \"$MOVIES\" -type f -iname '*.mkv' -o -iname '*.mov' -o -iname '*.mp4' -o  -iname '*.webm'"
 			find "$MOVIES" -type f -iname '*.mkv' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.webm' > "$VIDEODB"
 			n=$(wc -l "$VIDEODB"); n="${n%% *}"
@@ -462,7 +518,7 @@ Subtitles()
 		[ "${c%@}" = "$c" ] && g="${c}${t}M" || g="${c}${s}"
 		g=$(date "$g" "$f")
 		echo "$n
-00:$u:03,142 --> 00:$u:09,067
+00:${u}:03,142 --> 00:${u}:09,067
 $g
 $1
 "
@@ -473,22 +529,116 @@ $1
 	# Dbg "Date Parameters: [$g][$f]"
  }
 
-Abort()
+GetStoppedAt()
  {
-	local	mpid
-	if [ $MPID -ne 0 ]; then
-		mpid="$MPID"
-		MPID=0
-		echo "Abort: $mpid" >> /tmp/aerialist.$USER.log
-		kill $mpid
-		mv -f "$lockf" "${lockf}.old"
-		exit 66
-	else
-		echo "Lost player" >> /tmp/aerialist.$USER.log
-		cat "$lockf" >> /tmp/aerialist.$USER.log
+	local line
+	OUT=''
+	if [ $RESUME -ne 0 ]; then
+		if [ -s "$STATEDB" ]; then
+			while read line; do
+				[ "${line##*:}" = "$f" ] && OUT="${line%%:*}"
+			done < "$STATEDB"
+		fi
 	fi
  }
 
+SetStoppedAt()
+ {
+	local	t s line
+	if [ $RESUME -ne 0 ]; then
+		GetStoppedAt; [ -z "$OUT" ] && OUT=0
+		if [ "$1" = '0' ]; then
+			t=0
+			[ $OUT -eq 0 ] && return
+		else
+			s=$(( $(date +%s) - $STARTAT ))	# How many seconds have played
+			t=$((OUT + $s))	# Played before + played now
+		fi
+		echo "$t:${CHOICE##*/}" > "${STATEDB}.new"
+		while read line; do
+			[ "${line##*:}" != "${CHOICE##*/}" ] && echo "$line" >> "${STATEDB}.new"
+		done < "$STATEDB"
+		[ -e "$STATEDB" ] && mv -f "${STATEDB}" "${STATEDB}.old"
+		mv "${STATEDB}.new" "${STATEDB}"
+		rm -f "${STATEDB}.old"
+		OUT="$t"
+	fi
+ }
+
+Abort()
+ {
+	local	mpid f
+	if [ $MPID -ne 0 ]; then
+		mpid="$MPID"
+		MPID=0
+		Log "Abort: $mpid"
+		kill $mpid
+		mv -f "$lockf" "${lockf}.old"
+		SetStoppedAt
+		[ $RESUME -n 0 ] && Log "Stopped at: $OUT"
+		case "$OS_TYPE" in
+		  'Linux')	f='-h -q'	;;
+		  *)		f='-p'		;;
+		esac
+		sleep 1
+		ps $f "$mpid" >/dev/null 2>&1 && Log "Ninja: $mpid" && kill -9 $mpid
+		exit 66
+	else
+		Log "Lost player"
+		cat "$lockf" >> "$LOGF"
+	fi
+ }
+
+# Poor mans getopts - Install into xscreensaver and exit, test mode (just output what would happen)
+while [ -n "$1" ]; do case "$1" in
+  'install')	Install						;;	# Install into Xscreensaver / Download MOVIES
+  'online')		ONLINE=2					;;	# Use AppleTV videos
+  'offline')	ONLINE=0					;;	# ... or do NOT
+  'sound')		SOUND=25					;;	# Audio
+  'volume')		SOUND="$2"; shift			;;	
+  'aerial')		AERIAL="$2"; shift			;;	# MOVIES folders inside here
+  'movies')		MOVIES="$2"; shift			;;	# Just use this one
+  'hdr')		ONLINEHDR=1					;;	# AppleTV Video quality
+  '4k')			ONLINE4K=1					;;
+  'test')		TEST=1; TESTME="$2"; shift	;;	# Test one video file
+esac; shift; done
+
+# Lock for this display
+lockf="$XDG_RUNTIME_DIR/.aerialist.${DISPLAY#:}.lock"
+if [ -e "$lockf" ]; then
+	pid=$(head -n 1 "$lockf")	# aerialist
+	case "$OS_TYPE" in
+	  'Linux')	f='-h -q'	;;
+	  *)		f='-p'		;;
+	esac
+	ps $f "$pid" >/dev/null 2>&1 && echo "Aerialist locked by $pid in $lockf" && exit 33
+	pid=$(tail -n 1 "$lockf")	# mplayer
+	ps $f "$pid" >/dev/null 2>&1 && kill -9 "$pid"
+fi
+echo $$ > "$lockf"
+
+# Show info in test mode
+if [ $TEST -ne 0 ]; then
+	echo "Aerialist:	$gVers ($gDate)
+
+Season:		$SEASON
+Movies:		$AERIAL
+XDG Conf:	$(ls -ld $XDG_CONFIG_HOME)
+XDG Runt:	$(ls -ld $XDG_RUNTIME_DIR)
+Mplayer:	$(which mplayer)
+Curl:		$(which curl)
+Process:	$$
+Lockfile:	$lockf
+"
+fi
+
+# Plays the video - local and remote
+for i in 'mplayer' 'curl'; do
+	command -v "$i" >/dev/null 2>&1 || Throw "${0##*/} requires $i but it's not installed. Aborting."
+done
+
+############# Play loop - catch interupts ##############
+#
 trap Abort TERM INT HUP
 
 # Until we are killed...
@@ -525,6 +675,9 @@ while [ 9 -eq 9 ]; do
 	Subtitles "$st" > "$SUBTITLE"
 
 	[ -z "$SOUND" -o "$SOUND" = '0' ] && snd='-nosound' || snd="-volume $SOUND"
+	seek='' && [ $RESUME -ne 0 ] && GetStoppedAt && [ -n "$OUT" ] && seek="-ss $OUT"
+
+	STARTAT=$(date +%s)
 
 	if [ $TEST -ne 0 ]; then
 		head -n 5 "$SUBTITLE"
@@ -532,21 +685,23 @@ while [ 9 -eq 9 ]; do
 		[ "$CHOICE" = "${CHOICE#*:}" ] && ls -lh "$CHOICE"
 		echo '
 Press return to play'
-		echo "Command: mplayer $snd -nolirc $WINDOWID -fs \"$CHOICE\" -sub \"$SUBTITLE\" -panscan $PANSCAN"
+		echo "Command: mplayer $snd -nolirc $WINDOWID -fs \"$CHOICE\" -sub \"$SUBTITLE\" -panscan $PANSCAN" $seek
 		echo 'Press q during playback to exit'
 		read line
-		mplayer $snd -nolirc $WINDOWID -fs "$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN"
+		mplayer $snd -nolirc $WINDOWID -fs "$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN" $seek
 		exit 1
 	elif [ -s "$CHOICE" ]; then
 		# file is on filesystem so just play it
-		echo "Local: $CHOICE" > /tmp/aerialist.$USER.out
-		mplayer $snd -really-quiet -nolirc -nostop-xscreensaver $WINDOWID -fs "$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN" >> /tmp/aerialist.$USER.out 2>&1 &
+		echo "Local: $CHOICE" > "$LOGF"
+		mplayer $snd -really-quiet -nolirc -nostop-xscreensaver $WINDOWID -fs "$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN" $seek >> "$LOGF" 2>&1 &
 	    MPID=$!
+	    SetStoppedAt 0
 	elif [ $ONLINE -ne 0 ]; then
 		# no file on filesystem so try to stream it
-		echo "Streaming: $CHOICE" > /tmp/aerialist.$USER.out
-		mplayer $snd -really-quiet -nolirc -nostop-xscreensaver $WINDOWID -fs "$ONLINEURL/$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN" >> /tmp/aerialist.$USER.out 2>&1  &
+		echo "Streaming: $CHOICE" > "$LOGF"
+		mplayer $snd -really-quiet -nolirc -nostop-xscreensaver $WINDOWID -fs "$ONLINEURL/$CHOICE" -sub "$SUBTITLE" -panscan "$PANSCAN" $seek >> "$LOGF" 2>&1  &
 		MPID=$!
+		SetStoppedAt 0
 	else
 		echo "*** $MOVIES is empty and ONLINE is off ***"
 		exit 99
@@ -555,5 +710,5 @@ Press return to play'
 	wait $MPID
 	err=$?
 	sleep 3	# Sometimes PID hangs around after death
-	[ $err -gt 128 ] && { echo "Killing: $MPID" >> "/tmp/aerialist.$USER.out"; kill $MPID ; exit 121; }
+	[ $err -gt 128 ] && { Log "Killing: $MPID"; kill $MPID ; exit 121; }
 done
