@@ -22,7 +22,7 @@ Usage: Aerialist [install][4k][hdr][online][movies path][sound vol]
 		(e.g. Fireplace at night in Winter, Places, Animals by weekday)
 
 	Parameters that are "fun" are up front
-		Customize by puting overrides into ~/.config/aerialist
+		Customize by putting overrides into ~/.config/aerialist
 		in shell format
 
 
