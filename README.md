@@ -3,30 +3,6 @@ Short form poetry
 
 Generally FreeBSD/NetBSD/Darwin/Linux tested
 
-
-Usage: Aerialist [install][4k][hdr][online][movies path][sound vol]
-
-	Aerialist 1.10
-
-	A rewrite of the Aerial screensaver
-
-	Linux video screensaver gone wild - featuring
-		AppleTV online or cached
-		YouTube via youtube-dl and Seasons
-		Resume where the video was last interrupted
-		intermittent title/time overlay
-		Install / pre-download of videos
-			Run this same script with 'install' as a parameter
-		Crontab like selection of season
-			See "STABLE" below
-		(e.g. Fireplace at night in Winter, Places, Animals by weekday)
-
-	Parameters that are "fun" are up front
-		Customize by putting overrides into ~/.config/aerialist
-		in shell format
-
-
-
 Usage: xmlp [-a][-b][-C][-c][-d][-f][-h][-i][-k][-K c][-l][-m path][-n #][-Q c][-q][-s suffix][-t][-V][-x][-?] [URL or pathToFile, will use stdin if available]
 
         -a      Array item numbers blank (useful when searching for any array item)
