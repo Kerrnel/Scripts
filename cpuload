@@ -1,0 +1,36 @@
+#!/bin/sh
+
+Msg() { echo "$(date)		$@" >&2; }
+
+Secs()
+ {
+	local s d t
+	s=0; t="$1"
+	d="${t%%-*}"; [ "$d" != "$t" ] && s=$((24 * 3600 * ${d#0})) && t="${t#*-}"
+	d="${t##*:}"; t="${t%:*}"; s=$(($s + ${d#0}))
+	[ "$d" != "$t" ] && { d="${t##*:}"; t="${t%:*}"; s=$(($s + 60 * ${d#0})); }
+	[ "$d" != "$t" ] && { s=$(($s + 3600 * ${t#0})); }
+	eval "$2"="$s"
+ }
+LoadPct() { OUT=$(ps -o etime,time -p "$1" | { while read e t; do [ "$e" = "${e#E}" ] && { Secs "$e" E; Secs "$t" T; echo $(($T * 100 / $E)); }; done; }) || OUT=-1; }
+
+LoadWatch()
+ {
+	# Kill if high CPU after some time
+	
+	LoadFnc='Secs() { local s d t; s=0; t="$1"; d="${t%%-*}"; [ "$d" != "$t" ] && s=$((24 * 3600 * ${d#0})) && t="${t#*-}"; d="${t##*:}"; t="${t%:*}"; s=$(($s + ${d#0})); [ "$d" != "$t" ] && { d="${t##*:}"; t="${t%:*}"; s=$(($s + 60 * ${d#0})); }; [ "$d" != "$t" ] && { s=$(($s + 3600 * ${t#0})); }; eval "$2"="$s"; }; LoadPct() { OUT=$(ps -o etime,time -p "$1" | { while read e t; do [ "$e" = "${e#E}" ] && { Secs "$e" E; Secs "$t" T; echo $(($T * 100 / $E)); }; done; }) || OUT=-1; }'
+
+	LoadPct $1
+	Msg "Watchdog $1 (Currently $OUT) in 66 seconds"
+#	sh -c "$LoadFnc; LoadPct $1; echo AerialTest\$OUT"
+	sh -c "sleep 66; $LoadFnc; LoadPct $1; [ \$OUT -gt 50 ] && { echo AerialOverload\$OUT; kill $1; } || echo LoadFine\$OUT" &
+ }
+
+Secs '05-06:07:08' e; 	Msg "Test 1: $e"
+Secs '06:07' e;			Msg "Test 2: $e"
+
+[ -z "$1" ] && Msg "Usage: ${0##*/} [-]pid [pid [pid] ...] - Output average CPU load for a process (or processes) - preceding dash forks a Watchdog process"
+
+for i in "$@"; do
+	[ "$i" = "${i#-}" ] && { LoadPct "$i"; echo "$OUT"; } || LoadWatch "${i#-}"
+done

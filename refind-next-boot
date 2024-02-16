@@ -31,7 +31,6 @@ Log()
 		echo "$(date +%y%m%d.%H:%M:%S)		$line" | tee -a "$LOG" >&2
 	done
  }
-
 Err()	{ Log "*** $@";	}
 Dbg()	{ [ $DEBUG -ge $1 ] && shift && Log "+++ $@";	}
 
@@ -45,44 +44,24 @@ Throw()
  }
 
 # Find EFI folders
-for i in /*/*/'EFI'; do if [ -d "$i" ]; then
-	i=$(cd "$i"; pwd -P)
-	e="${EFIPATHS#:}"
-	while [ -n "$e" ]; do
-		[ "$i" = "${e%%:*}" ] && i=''
-		[ "$e" = "${e%%:*}" ] && e='' || e="${e#*:}"	
-	done
-	if [ -n "$i" ]; then
-		Log "Found:		$i"
-		EFIPATHS="${EFIPATHS}:$i"
-	fi
-fi; done
-EFIPATHS="${EFIPATHS#:}"
-if [ -z "$EFIPATHS" ]; then
-	$SUDO mount '/boot/efi'
-	[ -d '/boot/efi/EFI' ] && EFIPATHS='/boot/efi/EFI' || Throw 'Could not find or mount /boot/efi to find an EFI folder'
-fi
+FindEFI()
+ {
+	local	i e
 
-### MAIN
-REFINDPATH="${i%/refind.conf}"				# These will be recalculated in DoEfiFolder
-REFINDVARS="${REFINDPATH}/vars"
-RFVPATH="${REFINDVARS}/PreviousBoot"
-REFINDPLUS=0
-
-# Static
-BOOTGUID='36d08fa7-cf0b-42f5-8f14-68df73ed3740'
-EFIVAR="${BOOTGUID}-PreviousBoot"
-NVRPATH="/sys/firmware/efi/efivars/PreviousBoot-${BOOTGUID}"
-
-
-# Globals
-NVRAM=''
-PREVIOUS=''
-
-# Parameters
-NEWCHOICE="$1"
-NEWVOL="$2"
-
+	for i in /*/*/'EFI'; do if [ -d "$i" ]; then
+		i=$(cd "$i"; pwd -P)
+		e="${EFIPATHS#:}"
+		while [ -n "$e" ]; do
+			[ "$i" = "${e%%:*}" ] && i=''
+			[ "$e" = "${e%%:*}" ] && e='' || e="${e#*:}"	
+		done
+		if [ -n "$i" ]; then
+			Log "Found:		$i"
+			EFIPATHS="${EFIPATHS}:$i"
+		fi
+	fi; done
+	EFIPATHS="${EFIPATHS#:}"
+ }
 
 GetFsSize()
  {
@@ -159,6 +138,7 @@ SetPreviousBoot()
 		fi
 		[ ! -e "$EFITMP" ] && cp "$EFIBAK" "$EFITMP"
 		dd bs=1 if=/dev/zero of="$EFITMP" count=2 seek=$n 2>/dev/null	# Wide Null terminated
+		$SUDO mkdir -p "$REFINDVARS"
 		$SUDO cp "$EFITMP" "$RFVPATH"
 	  ;;
 
@@ -240,7 +220,7 @@ Utf8to16()
 	f="$2"
 
 	if which 'iconv' >/dev/null 2>&1; then
-		echo "$u" | iconv -f UTF8 -t UTF16LE >> "$f"
+		echo "$u" | iconv -f $UTF8 -t $UTF16LE >> "$f"
 		# Log $(hexdump -C "$f")
 	else
 		while [ $s -lt ${#u} ]; do
@@ -261,11 +241,11 @@ Utf16to8()
 	local line done
 	out=0
 	if [ -n "$2" ]; then
-		dd bs=1 skip=$2 if="$1" 2>/dev/null | iconv -f UTF16LE -t UTF8 | xargs --null -n 1 | while read line; do
+		dd bs=1 skip=$2 if="$1" 2>/dev/null | iconv -f $UTF16LE -t $UTF8 | xargs --null -n 1 | while read line; do
 			[ $out -eq 0 ] && echo "$line" && out=1
 		done
 	else
-		iconv -f UTF16LE -t UTF8 "$1" | xargs --null -n 1 | while read line; do
+		iconv -f $UTF16LE -t $UTF8 "$1" | xargs --null -n 1 | while read line; do
 			[ $out -eq 0 ] && echo "$line" && out=1
 		done
 	fi
@@ -369,13 +349,56 @@ EfiNext()
 	fi
  }
 
+FindEFI
+
+if [ -z "$EFIPATHS" ]; then
+	which 'mountAllESPs' >/dev/null 2>&1 && \
+		Log "No EFI path mounted, will ESP script." && \
+		mountAllESPs && sleep 5 && FindEFI
+
+	if [ -z "$EFIPATHS" ]; then
+		Log "No ESP script, will try to mount."
+		which 'diskutil' && diskutil mount 'EFI' || $SUDO mount '/boot/efi'
+		sleep 5
+		FindEFI
+		[ -z "$EFIPATHS" ] || Throw 'Could not find or mount /boot/efi to find an EFI folder'
+	fi
+fi
+
+### MAIN
+REFINDPATH="${REFINDPATH}/refind.conf}"				# These will be recalculated in DoEfiFolder
+REFINDVARS="${REFINDPATH}/vars"
+RFVPATH="${REFINDVARS}/PreviousBoot"
+REFINDPLUS=0
+
+# Static
+BOOTGUID='36d08fa7-cf0b-42f5-8f14-68df73ed3740'
+EFIVAR="${BOOTGUID}-PreviousBoot"
+NVRPATH="/sys/firmware/efi/efivars/PreviousBoot-${BOOTGUID}"
+
+# Globals
+NVRAM=''
+PREVIOUS=''
+
+# Parameters
+NEWCHOICE="$1"
+NEWVOL="$2"
+
+# Get UTF16LE in approprate form - Mac uses UTF-16LE, Linux UTF16LE; 2.35 on Linux tries to be cute on output , to terminal but \\nl to pipe
+UTF16LE=$(iconv -l | while read line; do line="${line%%/*}"; [ "$line" != "${line#UTF}" -a "$line" != "${line%16LE}" ] && echo "$line"; done | head -n 1)
+UTF8=$(iconv -l | while read line; do line="${line%%/*}"; [ "$line" != "${line#UTF}" -a "$line" != "${line%8}" ] && echo "$line"; done | head -n 1)
+Log "Iconv: UTF8: $UTF8 / UTF16LE: $UTF16LE"
+[ -z "$UTF8" -o -z "$UTF16LE" ] && Throw 'Check iconv code options with iconv -l'
+
 # Show EfiNext
 EFINEXT=$(EfiNext)
 [ -z "$EFINEXT" ] && EFINEXT='Unsupported OS detection'
 Log	"UEFI boot:	$EFINEXT"
 
 # Do all EFI paths found
-Log "Read with:	efivar -n $EFIVAR"
+[ -z "$EFIVAR" ] && \
+	Log "No efivar present. Must use vars folder." || \
+	Log "Read with:	efivar -n $EFIVAR"
 
 while [ -n "$EFIPATHS" ]; do
 	Log '___'
