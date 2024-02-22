@@ -1,6 +1,7 @@
 #!/bin/sh
 
 #	History
+#	016	GLK	240218	Remove non-bash-variable characters from interface name - FreeBSD borked with weird quoted wlan0
 #	015	GLK	231110	Minor cleanup
 #	014	GLK	231017	Support mask in IPcmp (8 bit chunks) in hex or decimal format
 #	013	GLK	231015	Handle bridged devices (seeing 'master' in ip show addr output)
@@ -70,6 +71,11 @@ IfProbe()
 		 }
 
 		function IfOut() {
+			# Remove characters that would cause variables to fail
+			dBash = dName
+			gsub("-", "_", dBash)
+			gsub(/[^[:alnum:]_]/, "", dBash)
+
 			if (dAll == "")
 				dAll = dName
 			else
@@ -91,7 +97,7 @@ IfProbe()
 
 			if (dAddr != "")
 			 {
-				print "IF" dName "IP=" dAddr
+				print "IF" dBash "IP=" dAddr
 				if (dType == "tunnel" || dType == "virtual")
 				 {
 					dVip = dVip == "" ? dAddr : dVip " " dAddr
@@ -138,26 +144,26 @@ IfProbe()
 				 }
 			 }
 
-			if (dAdIn != 0) print "IF" dName "INT=" dAdIn
-			if (dMask != "") print "IF" dName "MSK=" dMask
-			if (dAlia != "" && dAlia != dAddr) print "IF" dName "IPA=\"" dAlia "\""
-			if (dAdd6 != "") print "IF" dName "IP6=" dAdd6
-			if (dPfx6 != "") print "IF" dName "PF6=" dPfx6
-			if (dMacA != "") print "IF" dName "MAC=" dMacA
-			if (dType != "") print "IF" dName "TYPE=" dType
-			if (dMedi != "") print "IF" dName "MED=" dMedi
-			if (dMemb != "") print "IF" dName "MEM=\"" dMemb "\""
-			if (dActi != "") print "IF" dName "ACT=" dActi
-			if (dStat != "") print "IF" dName "UP=" dStat
-			if (dFlag != "") print "IF" dName "FLAG=\"" dFlag "\""
-			if (dMTU != "") print "IF" dName "MTU=" dMTU
-			if (dPID != "") print "IF" dName "PID=" dPID
-			if (dSSID != "") print "IF" dName "SSID=" dSSID
-			if (dPwr != "") print "IF" dName "PWR=" dPwr
-			if (dAltN != "") print "IF" dName "ALT=" dAltN
-			if (dFib != "") print "IF" dName "FIB=" dFib
-			if (dGrp != "") print "IF" dName "GRP=" dGrp
-			if (dBdg != "") print "IF" dName "BDG=" dBdg
+			if (dAdIn != 0) print "IF" dBash "INT=" dAdIn
+			if (dMask != "") print "IF" dBash "MSK=" dMask
+			if (dAlia != "" && dAlia != dAddr) print "IF" dBash "IPA=\"" dAlia "\""
+			if (dAdd6 != "") print "IF" dBash "IP6=" dAdd6
+			if (dPfx6 != "") print "IF" dBash "PF6=" dPfx6
+			if (dMacA != "") print "IF" dBash "MAC=" dMacA
+			if (dType != "") print "IF" dBash "TYPE=" dType
+			if (dMedi != "") print "IF" dBash "MED=" dMedi
+			if (dMemb != "") print "IF" dBash "MEM=\"" dMemb "\""
+			if (dActi != "") print "IF" dBash "ACT=" dActi
+			if (dStat != "") print "IF" dBash "UP=" dStat
+			if (dFlag != "") print "IF" dBash "FLAG=\"" dFlag "\""
+			if (dMTU != "") print "IF" dBash "MTU=" dMTU
+			if (dPID != "") print "IF" dBash "PID=" dPID
+			if (dSSID != "") print "IF" dBash "SSID=" dSSID
+			if (dPwr != "") print "IF" dBash "PWR=" dPwr
+			if (dAltN != "") print "IF" dBash "ALT=" dAltN
+			if (dFib != "") print "IF" dBash "FIB=" dFib
+			if (dGrp != "") print "IF" dBash "GRP=" dGrp
+			if (dBdg != "") print "IF" dBash "BDG=" dBdg
 
 			# Switch is a gnu awk extension
 			if ("tunnel" == dType)
@@ -307,8 +313,6 @@ IfProbe()
 				 {
 					dType = "bridge"
 					dBdg = dBdg == "" ? dName : dBdg "" dName
-					if (atLoc > 0)
-						dName = substr(dName, 0, atLoc - 1) "_" substr(dName, atLoc +1)
 				 }
 
 				if ($3 == "mtu")
@@ -414,7 +418,7 @@ IfProbe()
 			if (dWifi != "" && dExt == "")
 				dExt = dWifi
 
-			print "IFSUPV=1.1.3.2023.11.10"			# Version of me
+			print "IFSUPV=1.1.5.2024.02.18"			# Version of me
 			print "IFALL=\"" dAll "\""				# All Devices
 			print "IFAUTO=\"" dAut "\""				# Auto Config Devices
 			print "IFAIP=\"" dAip "\""				# Auto Config IPs
