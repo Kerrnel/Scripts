@@ -184,7 +184,8 @@ EntryParse()
 		  ;;
 
 		  [Ss][Uu][Bb][Mm][Ee][Nn][Uu][Ee][Nn][Tt][Rr][Yy]*)	depth=2			;;
-		  'include')	EntryFromConf "$REFINDPATH/$line" "$e" "$p"				;;
+		  'include')	line="${line%\"}"; line="${line#\"}";
+		  				EntryFromConf "$REFINDPATH/$line" "$e" "$p"				;;
 		  'disabled')	[ $depth -eq 1 ] && subMenu=''							;;
 
 		  "$p")
@@ -205,9 +206,16 @@ EntryParse()
 	fi; done
  }
 
-EntryFromConf()	{	Dbg 2 "EFC: [$1][$2][$3]"; cat "$1" | sed -e 's/#.*//' | EntryParse "$2" "$3";		}
-ReadEntries()	{	EntryFromConf "$REFINDPATH/refind.conf" "$1" "$2";						}
-ReadProperty()	{	Dbg 1 "RdP: $@"; ReadEntries "$@" | tail -n 1;											}
+EntryFromConf()	{	Dbg 2 "EFC: [$1][$2][$3]"; sed -e 's/#.*//' < "$1" | EntryParse "$2" "$3";	}
+ReadProperty()	{	Dbg 1 "RdP: $@"; ReadEntries "$@" | tail -n 1;								}
+
+ReadEntries()
+ {
+	local f="$REFINDPATH/refind.conf"
+	local c="$REFINDPATH/config.conf"
+	[ $REFINDPLUS -ne 0 -a -e "$c" ] && f="$c"
+	EntryFromConf "$f" "$1" "$2";
+ }
 
 Utf8to16()
  {
@@ -284,16 +292,19 @@ DoRefindConf()
 	if [ -n "$NEWCHOICE" ]; then
 		echo "$list" | IsIn "$NEWCHOICE"
 		err=$?
+		[ -z "$vol" ] && vol=$(ReadProperty "$NEWCHOICE" 'volume')
 
 		if [ $err -ne 0 ]; then
 			Log "Using $NEWCHOICE as a partial match"
-			[ -z "$vol" ] && vol=$(ReadProperty "$NEWCHOICE" 'volume')
 			choice="Boot ${NEWCHOICE}"					# Seems to be what Refind stores
 			[ -n "$vol" ] && choice="${choice} from ${vol}"
 		else
 			Log "Found $NEWCHOICE as a menu entry"
 			if [ $REFINDPLUS -ne 0 ]; then
 				choice="Load Manual Stanza: ${NEWCHOICE}"	# Seems to be what RefindPlus stores in 2023
+				# I can not quite figure out which time to use the former and which to use this ... should look at source
+#				choice="Boot ${NEWCHOICE}"	# Seems to be what RefindPlus stores in 2023
+#				[ -n "$vol" ] && choice="${choice} from ${vol}"
 			else
 				choice="Boot ${NEWCHOICE}"	# Seems to be what RefindPlus stores in 2023
 				[ -n "$vol" ] && choice="${choice} from ${vol}"
@@ -358,10 +369,10 @@ if [ -z "$EFIPATHS" ]; then
 
 	if [ -z "$EFIPATHS" ]; then
 		Log "No ESP script, will try to mount."
-		which 'diskutil' && diskutil mount 'EFI' || $SUDO mount '/boot/efi'
+		which 'diskutil' && diskutil mount 'EFI' || { $SUDO mount '/boot/efi' || $SUDO mount '/boot/esp'; }
 		sleep 5
 		FindEFI
-		[ -z "$EFIPATHS" ] || Throw 'Could not find or mount /boot/efi to find an EFI folder'
+		[ -z "$EFIPATHS" ] || Throw 'Could not find or mount /boot/efi(or esp) to find an EFI folder'
 	fi
 fi
 
@@ -385,10 +396,25 @@ NEWCHOICE="$1"
 NEWVOL="$2"
 
 # Get UTF16LE in approprate form - Mac uses UTF-16LE, Linux UTF16LE; 2.35 on Linux tries to be cute on output , to terminal but \\nl to pipe
-UTF16LE=$(iconv -l | while read line; do line="${line%%/*}"; [ "$line" != "${line#UTF}" -a "$line" != "${line%16LE}" ] && echo "$line"; done | head -n 1)
-UTF8=$(iconv -l | while read line; do line="${line%%/*}"; [ "$line" != "${line#UTF}" -a "$line" != "${line%8}" ] && echo "$line"; done | head -n 1)
+iconvID()
+ {
+	# Void iconv - need , and space. Debian - / and \n
+	local	i
+	local	l=$(iconv -l)
+	local	IFS=', /
+'
+	for i in $l; do if [ -n "$i" ]; then
+		[ "${i#$1}" != "$i" -a "${i%$2}" != "$i" ] && { OUT="$i"; return 0; }
+		# echo "[$i]" >&2
+	fi; done
+	return 1
+ }
+
+iconvID 'UTF' '16LE' && UTF16LE="$OUT"
+iconvID 'UTF' '8' && UTF8="$OUT"
+
 Log "Iconv: UTF8: $UTF8 / UTF16LE: $UTF16LE"
-[ -z "$UTF8" -o -z "$UTF16LE" ] && Throw 'Check iconv code options with iconv -l'
+[ -z "$UTF8" -o -z "$UTF16LE" ] && { iconvID 'UTF' '';  Throw "Check iconv code options with iconv -l ($UTF8/$UTF16LE/$OUT)"; }
 
 # Show EfiNext
 EFINEXT=$(EfiNext)

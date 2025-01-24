@@ -1,0 +1,92 @@
+#!/bin/sh
+
+#	Read/Write KDE Ini files (variant of ini) 
+#	e.g.
+#	KiniGet KScreen/ScaleFactor ~/.config/kdeglobals
+#	KiniSet KScreen/ScaleFactor 3 ~/.config/kdeglobals
+#	kiniSet Kscreen/ScreenScaleFactors/HDMI-1 2.5 ~/.config/kdeglobals
+
+#	History
+#	001	GLK	240315	Start - todo - multi-items are k=x=y;a=b;c=d; format - done
+
+sv_vers_conf=1
+sv_lib_kini_loaded=':'
+
+KiniGet()
+ {
+	[ ! -e "$2" ] && return 2
+	local	x y z k v i IFS
+	x="[${1%%/*}]"
+	y="${1##*/}"
+	z="${1#*/}"; [ "$z" = "$y" ] && z='' || { i="$z"; z="$y"; y="${i%%/*}"; }
+	i=0
+	IFS=' ='
+	while read k v; do case "$k" in
+	  \[*)	[ "$k" = "$x" ] && i=1 || i=0	;;
+	  \#*)	;;
+	  *)	#	[^'#'] and [\#] work in bash - but not dash
+		if [ $i -ne 0  -a "$k" = "$y" ]; then
+			[ -z "$z" ] && { OUT="$v"; return 0; }
+			while [ -n "$v" ]; do
+				k="${v%%=*}"; v="${v#*=}"
+				[ "$k" = "$z" ] && { OUT="${v%%;*}"; return 0; }
+				[ "${v#*;}" = "$v" ] && v='' || v="${v#*;}"
+			done
+		fi
+	  ;;
+	esac; done < "$2"
+	return 1
+ }
+
+KiniSet()
+ {
+	[ ! -e "$3" ] && touch "$3"
+	local	x y z s k v t b m l
+	t='
+'	# \n
+	x="[${1%%/*}]"
+	y="${1##*/}"
+	z="${1#*/}"; [ "$z" = "$y" ] && z='' || { i="$z"; z="$y"; y="${i%%/*}"; }
+
+	i=0; m=0
+	while read l; do
+		case "$l" in
+		  \[*)
+				[ $i -eq 1 -a $m -eq 0 ] && { [ -z "$z" ] && l="$y=$2$t$l" || l="$y=$z=$2$t$l"; m=3; } 	# Not found - insert here
+				[ "$l" = "$x" ] && i=1 || i=0
+		  ;;
+		  \#*)	;;
+		  *)
+			k="${l%%=*}"
+			if [ $i -ne 0 -a "$k" = "$y" ]; then
+				m=1
+				v="${l#*=}"
+				if [ -z "$z" ]; then
+					[ "$v" = "$2" ] && return 1	# No change
+					l="${y}=$2"
+				else
+					l="${y}="
+					while [ -n "$v" ]; do
+						k="${v%%=*}"; v="${v#*=}"; x="${v%%;*}"
+						if [ "$k" = "$z" ]; then
+							[ "$x" = "$2" ] && return 1	# No change
+							l="$l$k=$2;"; m=2
+						else
+							l="$l$k=$x;"
+						fi
+						[ "${v#*;}" = "$v" ] && v='' || v="${v#*;}"
+					done
+					[ $m -lt 2 ] && { l="$l$z=$2;"; m=2; }
+				fi
+			fi
+		  ;;
+		esac
+		b="$b$t$l"
+	done < "$3"
+	[ $m -eq 0 ] && { [ -z "$z" ] && b="$b$t$t$x$t$y=$2" || b="$b$t$t$x$t$y=$z=$2;"; b="${b#$t$t}"; }
+	echo "${b#$t}" > "$3"
+#	OUT="${b#$t}"
+	return 0
+ }
+
+# [ -z "$3" ] && { KiniGet "$1" "$2" && echo "Found: [$OUT]" || echo "Not found"; } || { KiniSet "$1" "$2" "$3" && echo "Change: $OUT" || echo "No change"; }

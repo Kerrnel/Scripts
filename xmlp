@@ -1,12 +1,18 @@
 #!/bin/bash
-gVersion=0.21
-gStamped=230902
+gVersion=0.22
+gStamped=240913
+
+# Catch interupts to clean up
+trap DoHUP TERM HUP
+trap DoINT INT
+
 #
 #	xmlp (c) 2020-23 Greg Kerr, Akua Co.
 #
 #	License: Public Domain
 #
 #	History
+#	022	GLK	240913	Friday the 13th! - Trying to catch erros on 464/477 with cron job saying amp: command not found
 #	021	GLK	230902	Failed to wget reddit.com - made curl and links higher priority, added WRE for referer (probably not needed)
 #	020	GLK	230610	Merge in YML start from Rock
 #	019	GLK	230516	Treat tr tags as array if encountered while parsing XML so -he can convert a table snippet
@@ -114,14 +120,32 @@ IXD='^'			# Index delimiter - within a tag
 DAD='.'			# Path compression, use prior path - last [DDD] component + rest after DAD
 EQC='='			# Key=Value separator
 
+USER=${USER:-$(id -un)}
+LOGF="/tmp/$USER-${0##*/}.log"
 Msg()
  {
 	local t
 	[ "$1" = '-' ] && shift || ([ -n "$EPOCHSECONDS" ] && t="$EPOCHSECONDS" || t=$(date '+%s'); t="$((1000 + ($t % 3600))): ")
 	echo "$t$@" >&2
  }
-InfoMsg()	{	[ $DEBUG -gt 0 ] && Msg "$@"; }
-DbgMsg()	{	local msg; [ $DEBUG -gt 1 ] && msg="$1" && shift && Msg "====> $msg" "$@"; }
+Info()	{	[ $DEBUG -gt 0 ] && Msg "$@"; }
+Dbg()	{	local msg; [ $DEBUG -gt 1 ] && msg="$1" && shift && Msg "====> $msg" "$@"; }
+Log()	{	Msg "$@" 2>&1 | tee -a "$LOGF" >&2;			}
+Throw()	{	[ -n "$1" ] && Log "=== $1 ==="; exit ${2:-22}; exit 9;	}
+
+DoINT()
+ {
+#	Stop
+	# Must untrap and harakiri to properly INT and QUIT (but bash ignores QUIT) https://mywiki.wooledge.org/SignalTrap#preview
+	trap - INT
+	kill -s INT $$
+ }
+
+DoHUP()
+ {
+#	Stop
+	Throw "${1:-End}" "${2:-0}"
+ }
 
 AutoEnter()
  {
@@ -136,33 +160,33 @@ AutoEnter()
 		n="${p%%:*}"	p="${p#*:}"
 		n=$((1 + $n))
 		AUTOX="${AUTOX%%:$1:*:*:}:$1:$2:$n:${AUTOX##:$1:*:*:}"
-		DbgMsg "AE: $AUTOX [$n]"
+		Dbg "AE: $AUTOX [$n]"
 		AUTON=$n
 	fi
  }
 
 AutoLeave() 
  {
-	DbgMsg "Nothing yet"
+	Dbg "Nothing yet"
  }
 
 ReadRaw()
  {
 	local IFS=\>
 
-	DbgMsg 'RR'
+	Dbg 'RR'
 	if read -r -d \< -t 33 ENTITY CONTENT; then
-#		DbgMsg "E: $ENTITY"
-#		DbgMsg "C: $CONTENT"
+#		Dbg "E: $ENTITY"
+#		Dbg "C: $CONTENT"
 		CMT="${ENTITY#!--}"				# Comment also single tag element - only support comments that have no '>' in them (terminator)
 		CONTENT="${CONTENT%"${CONTENT##*[![:space:]]}"}"	# Remove trailing whitespace characters
 		if [ "$CMT" != "$ENTITY" ]; then
 			[ -n "$CONTENT" ] && CMT="${ENTITY}>${CONTENT%>}"
 			# Get rest of comment up to -->
 			while [ "$CMT" = "${CMT%--}" ]; do
-				DbgMsg "C: $CMT"
+				Dbg "C: $CMT"
 				if read -r -d \< -t 33 TAG; then
-					DbgMsg "D: $TAG"
+					Dbg "D: $TAG"
 					TAG="${TAG%"${TAG##*[![:space:]]}"}"			# Remove trailing whitespace characters
 					[ "$TAG" != "${TAG%-->}" ] && TAG="${TAG%>}"	# At end of comment?
 					CMT="${CMT}<$TAG"
@@ -182,10 +206,10 @@ ReadRaw()
 			PROP="${PROP%[[:space:]]}"		# Dangling space in singlet
 			TAG="${TAG%%[[:space:]]*}"		# Space separator after TAG?
 		fi
-		DbgMsg "e: $ENTITY"
-		DbgMsg "c: $CONTENT"
-		DbgMsg "t: $TAG [$SINGLET]"
-		DbgMsg "p: $PROP"
+		Dbg "e: $ENTITY"
+		Dbg "c: $CONTENT"
+		Dbg "t: $TAG [$SINGLET]"
+		Dbg "p: $PROP"
 		return 0
 	fi
 	return 1
@@ -228,7 +252,7 @@ ReadTag()
 		fi
 		# TAG (Element Name) by spec are case sensitive, but attributes not
 		# [ $BASH_VERSINFO -gt 3 ] && TAG="${TAG,,*}" || TAG=$(echo "$TAG" | tr '[:upper:]' '[:lower:]')				# ... lower case all tags for match - fails on Darwin's bash 3.x - spec says case matters
-		DbgMsg "RTAG: $TAG [$PROP]$CONTENT[$SINGLET|$DEPTH|$CWP]"
+		Dbg "RTAG: $TAG [$PROP]$CONTENT[$SINGLET|$DEPTH|$CWP]"
 		return 0
 	fi
 	return 1
@@ -306,7 +330,7 @@ ReadXmlTag()
 
 			# Singlets are processed as a whole - so we are either going deep or popping up
 			if [ "$TAG" = '!--' ]; then	# Comment? Don't change depth or CWP (Path)
-				DbgMsg "Comment: $PROP"
+				Dbg "Comment: $PROP"
 			elif [ "${TAG#/}" = "$TAG" ]; then	# Going deeper (not ending a block)
 				# Msg "-------------> Push $TAG onto ($CWP - $pDic - $PROP - $CONTENT)"
 				CWP="${CWP}${del}$TAG"
@@ -367,7 +391,7 @@ PrintLine()
 	tag="$1"
 	val="$2"
 
-	DbgMsg "LINE: $tag [$val] [$MATCH] [$SUFFIX] $IGNOREBLANK [$PRIOR]"
+	Dbg "LINE: $tag [$val] [$MATCH] [$SUFFIX] $IGNOREBLANK [$PRIOR]"
 
 	# Skip line if not a match
 	[ -n "$MATCH" -a "${tag#$MATCH}" = "$tag" ] && SKIPLINE=1 && return 0
@@ -386,11 +410,11 @@ PrintProps()
 	local	tag="$1"
 	shift
 
-	DbgMsg "PROP: [$tag] [$@] [$#]"
-	[ $SINGLET -ne 0 ] && tag="${tag}$SND${TAG}" && DbgMsg "SINGLET: $tag [$TAG]"
+	Dbg "PROP: [$tag] [$@] [$#]"
+	[ $SINGLET -ne 0 ] && tag="${tag}$SND${TAG}" && Dbg "SINGLET: $tag [$TAG]"
 
 	for i in "$@"; do
-		# DbgMsg "PROP: ($i) ($TAG) ($@)"
+		# Dbg "PROP: ($i) ($TAG) ($@)"
 		p="${i%%=*}"	# Split property from value
 		v="${i#*=}"
 		v="${v#\"}"		# Chop off quoting
@@ -421,10 +445,10 @@ PrintTag()
 	tag="$1"
 	[ -n "$2" ] && PROP="$2"
 	shift
-	[ -z "$tag" ] && tag="$CWP" && DbgMsg "TCWP: $tag [$PROP]"
+	[ -z "$tag" ] && tag="$CWP" && Dbg "TCWP: $tag [$PROP]"
 
 	if [ $OUTYML -eq 0 ]; then
-		DbgMsg "PTAG: [$tag] [$PROP] $IGNOREBLANK [$PRIOR]"
+		Dbg "PTAG: [$tag] [$PROP] $IGNOREBLANK [$PRIOR]"
 		if [ "$TAG" = '!--' ]; then
 			PROP=$(echo "$PROP" | MultiLine)
 			PrintLine '#' "$PROP"
@@ -437,12 +461,13 @@ PrintTag()
 				HtmlUnraw "$tag"; tag="$OUT"
 #				Msg "+++ [$tag][$PROP]"					# PROP can have '&amp;'
 			fi
-			eval PrintProps \"$tag\" $PROP          # Need to get props as "$@" - for i in $PROP fails to break words properly (without eval, HTML parse failed on two word alt img tag)
+			# Got a spurious error on next line saying: amp: command not found
+			eval PrintProps \"$tag\" $PROP 2>/dev/null || Log "Err 464 [$tag][$PROP]"				# Need to get props as "$@" - for i in $PROP fails to break words properly (without eval, HTML parse failed on two word alt img tag)
 			[ $MULTILINE -ne 0 ] && CONTENT=$(echo "$CONTENT" | MultiLine)
 			PrintLine "$tag" "$CONTENT"
 		fi
 	elif [ $OUTXML -eq 0 ]; then
-		DbgMsg "PTAG: [$tag] [$PROP] $IGNOREBLANK [$PRIOR]"
+		Dbg "PTAG: [$tag] [$PROP] $IGNOREBLANK [$PRIOR]"
 		if [ "$TAG" = '!--' ]; then
 			PROP=$(echo "$PROP" | MultiLine)
 			PrintLine "__$CMTN" "$PROP"
@@ -450,7 +475,7 @@ PrintTag()
 		else
 			[ $MULTILINE -ne 0 ] && PROP=$(echo "$PROP" | MultiLine)
 			# Got a spurious error on next line saying: amp: command not found
-			eval PrintProps \"$tag\" $PROP		# Need to get props as "$@" - for i in $PROP fails to break words properly (without eval, HTML parse failed on two word alt img tag)
+			eval PrintProps \"$tag\" $PROP 2>/dev/null || Log "Err 477 [$tag][$PROP]"		# Need to get props as "$@" - for i in $PROP fails to break words properly (without eval, HTML parse failed on two word alt img tag)
 			[ $MULTILINE -ne 0 ] && CONTENT=$(echo "$CONTENT" | MultiLine)
 			PrintLine "$tag" "$CONTENT"
 		fi
@@ -476,7 +501,7 @@ CompressTag()
 	local	t="$1"
 	local	m=1			# Matched so far
 
-	DbgMsg "*** COMP: [$LASTWP][$t][$CWP]"
+	Dbg "*** COMP: [$LASTWP][$t][$CWP]"
 
 	a="${t#$LASTWP}"	# Try lopping off LastWP
 	if [ "${t#*${SUD}#}" != "$t" ]; then
@@ -508,7 +533,7 @@ PrintField()
 		[ "$p" = "$f" ] && f='' || f="${f#*[[:space:]]}"
 	done
 	l="${l# }"
-	DbgMsg "FIELD: $tag [$2] [$p] [$l] [$EXPAND]"
+	Dbg "FIELD: $tag [$2] [$p] [$l] [$EXPAND]"
 
 	if [ $SKIPLINE -eq 0 ]; then
 		if [ -n "$SUFFIX" ]; then
@@ -559,20 +584,20 @@ FlattenXml()
 
 	while ReadXmlTag; do if [ -n "$TAG" ]; then case "$TAG" in
 	  '!--')
-		InfoMsg "CMT: $PROP"
+		Info "CMT: $PROP"
 		[ -n "$PROP" ] && PrintTag '!--' "$PROP"
 	  ;;
 
 	  'content')
-		DbgMsg "CONTENT ($RAWCONTENT): $CONTENT"
+		Dbg "CONTENT ($RAWCONTENT): $CONTENT"
 		DoContentTag "$TAG" "$CONTENT"
 		ReadXmlTag || return 0		# kill /content
 	  ;;
 
 	  *)
-		DbgMsg "READ: $TAG [$PROP] [$CONTENT] [$CWP] [$OUTXML]"
+		Dbg "READ: $TAG [$PROP] [$CONTENT] [$CWP] [$OUTXML]"
 		PrintTag
-		DbgMsg "RADE: $TAG [$PROP] [$CONTENT] [$CWP]"
+		Dbg "RADE: $TAG [$PROP] [$CONTENT] [$CWP]"
 	  ;;
 	esac; [ "$TAG" != '!--' ] && PRIOR="${TAG##*/}"; fi; done
  }
@@ -587,7 +612,7 @@ FlattenHtml()
 
 	while ReadHtmlTag; do if [ -n "$TAG" ]; then case "$TAG" in
 	  '!--')
-		InfoMsg "CMT: $PROP"
+		Info "CMT: $PROP"
 		[ -n "$PROP" ] && PrintTag '!--' "$PROP"
 	  ;;
 
@@ -623,7 +648,7 @@ DoContentTag()
 	if [ $RAWCONTENT -lt 2 ]; then
 		HtmlUnraw "$2"
 		html="$OUT"
-		InfoMsg "HTML: $html"
+		Info "HTML: $html"
 	fi
 
 	case $RAWCONTENT in
@@ -638,7 +663,7 @@ DoRaw()
 	while ReadRaw; do
 		echo "T: $TAG"
 	done
-	DbgMsg 'Exit Raw'
+	Dbg 'Exit Raw'
  }
 
 DoXML()
@@ -693,9 +718,9 @@ DoXML()
 	done
 
 	# Now inside XML
-	InfoMsg "ENTER: XML $ROOTELEM ($CWP)"
+	Info "ENTER: XML $ROOTELEM ($CWP)"
 	FlattenXml	# Start at the top tag
-	InfoMsg "LEAVE: XML $ROOTELEM"
+	Info "LEAVE: XML $ROOTELEM"
  }
 
 DoTheRightThing()
@@ -848,10 +873,10 @@ GetURL()
 			echo "Need curl or wget to get URLs"
 			exit 1
 		fi
-		InfoMsg "Loading: $1 with $w $f"
+		Info "Loading: $1 with $w $f"
 		$w $f "$1" 2>/dev/null
 		e=$?
-		DbgMsg "Loaded ($e): $1"
+		Dbg "Loaded ($e): $1"
 	elif [ -f "$1" ]; then
 		if which 'plutil' > /dev/null 2>&1; then
 			# Text xml?

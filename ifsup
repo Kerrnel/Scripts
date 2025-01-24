@@ -1,6 +1,15 @@
 #!/bin/sh
 
 #	History
+#	025	GLK	241214	br-1234... devices are a problem - we changed variable names but not device itself
+#	024	GLK	241010	Do not fake WIP - if outside script sets it, we can use it - but to iffy to guess
+#	023	GLK	240624	Provide media speed (FreeBSD/ifconfig for now), with duplex
+#	022	GLK	240506	Only set IFINT if we have IFWIP - a public or separate NET as determined by IP/Mask
+#	021	GLK	240501	Multiple IP issue - quote addresses & masks
+#	020	GLK	240430	This is not working - fudging IFEXT - use IFTBD for unknown interface list (e.g. to pass to dhcpcd until it gets an assignment)
+#	019	GLK	240429	Bug with IFINT being set erroneously with the real IFINT being down
+#	018	GLK	240423	Respect /var/run/env/IF??? overrides set by services (dhcpcd etc)
+#	017	GLK	240314	One less shell, use Gestalt hints for IFEXT if inside LAN firewall testing, fix IPcmp
 #	016	GLK	240218	Remove non-bash-variable characters from interface name - FreeBSD borked with weird quoted wlan0
 #	015	GLK	231110	Minor cleanup
 #	014	GLK	231017	Support mask in IPcmp (8 bit chunks) in hex or decimal format
@@ -21,13 +30,23 @@
 
 IfProbe()
  {
-	(which 'ip' >/dev/null 2>&1 && ip addr show || ifconfig -a) | awk -v gOS="$(uname -s)" '
+	local	i v a
+
+	# Read in Gestalt IF* hints
+	for i in '/var/run/env/IF'???; do if [ -s "$i" ]; then
+		read v < "$i"
+		v="${v%% *}"; v="${v#* }"
+		a="$a -v g${i##*/}=$v"
+		# echo "g${i##*/}=\"$v\""
+	fi; done
+
+	{ command -v 'ip' >/dev/null && ip addr show || ifconfig -a; } | awk -v "gOS=$(uname -s)" $a '
 
 		function Empty() {
 			# Empty for each interface (not global for all)
 			dName = ""
 			dAddr = ""
-			dAdIn = 0
+			dAdIn = 0	# Address of current device is Internal (Private)
 			dAlia = ""
 			dMask = ""
 			dAdd6 = ""
@@ -35,6 +54,7 @@ IfProbe()
 			dMacA = ""
 			dType = ""
 			dMedi = ""
+			dFast = ""
 			dMemb = ""
 			dActi = ""
 			dStat = ""
@@ -59,7 +79,7 @@ IfProbe()
 				m = 4 * (index(substr(m, 3), "0") - 1)	# Bits in mask e.g. 0xfff00000 is 12 (4 * (4 - 1))
 				if (m < 0) m = 32
 			 }
-			for (i = 0; i < 4 && m > 0; i++)
+			for (i = 0; i < 4 && m >= 0; i++)
 			 {
 				if (aa[i] < bb[i])
 					return -1
@@ -76,82 +96,88 @@ IfProbe()
 			gsub("-", "_", dBash)
 			gsub(/[^[:alnum:]_]/, "", dBash)
 
-			if (dAll == "")
-				dAll = dName
-			else
-				dAll = dAll " " dName
+			dAll = dAll == "" ? dBash : dAll " " dBash
+
+			if ("Linux" == gOS && dBash ~ /^w/)	# Can not see a way to identify on Linux other than first character 
+				dType = "wifi"
 
 			ac=0
 			if ("active" == dActi)
 			 {
-				dActive = dActive == "" ? dName : dActive " " dName
+				dActive = dActive == "" ? dBash : dActive " " dBash
 				ac=1
 			 }
 			else if ("running" == dActi)
 			 {
-				dRun = dRun == "" ? dName : dRun " " dName
+				dRun = dRun == "" ? dBash : dRun " " dBash
 				ac=1
 			 }
 			else if ("no" == dActi)
 				dActi = ""
 
-			if (dAddr != "")
+			# Address processing - dAdIn setting - 0 undefined, 1 autol, 2 private, <0 public
+			if ("" == dAddr)
 			 {
-				print "IF" dBash "IP=" dAddr
+				if ("ether" == dType || "wifi" == dType || "bridge" == dType)
+					dTbd = dTbd == "" ? dBash : dTbd " " dBash
+			 }
+			else
+			 {
+				print "IF" dBash "IP=\"" dAddr "\""
 				if (dType == "tunnel" || dType == "virtual")
 				 {
-					dVip = dVip == "" ? dAddr : dVip " " dAddr
+					dVip = (dVip == "" || dAddr == dVip) ? dAddr : dVip " " dAddr
 				 }
 				else if ("loop" != dType && "slave" != dType)
 				 {
-					# 0 undefined, 1 auto internal, 2 internal, <0 public
 					if (dAddr ~ /^192.168.|^172.1[6-9]\.|^172.2[0-9]\.|^172.3[0-1]\.|^10\./)
 					 {
 						dAdIn = 2
-						dLan = dLan == "" ? dName : dLan " " dName
-						if (dLip == "")
+						dLan = dLan == "" ? dBash : dLan " " dBash
+						if (dLip == "" || dLip == dAddr)	# Same addr on another device?
 							dLip = dAddr
 						else
 						 {
 							c = IPcmp(dAddr, dLip, dMask)
-							
 							if (0 == c)	# Same LAN?
 								dLip = dLip " " dAddr
-							else if (c > 1)
+							else if ((c > 1) || (dLip == gIFWIP))
 							 {
-								dWip = dLip	# Assume DMZ to this IP by convention
+								dWip = dLip		# Assume DMZ to this IP by convention - or Gestalt IFWIP
 								dLip = dAddr
 							 }
-							else if (dWip == "")
-							 {
-								dAdIn = -1	# Pretend public IP (DMZ)
-								dWip = dAddr
-							 }
+							# else if (dWip == "")
+							# {
+							#	dAdIn = -1	# Pretend public IP (DMZ)
+							#	dWip = dAddr
+							# }
 						 }
 					 }
 					else if (dAddr ~ /^169.254\./)
 					 {
-						dAut = dAut == "" ? dName : dAut " " dName
+						dAut = dAut == "" ? dBash : dAut " " dBash
 						dAip = dAddr
 						dAdIn = 1
 					 }
-					else if (dAddr != "")
+					else if (dAddr != "" && dAddr != "0.0.0.0" )
 					 {
 						dAdIn = -1	# Public IP
-						dWan = dWan == "" ? dName : dWan " " dName
+						dWan = dWan == "" ? dBash : dWan " " dBash
 						dWip = dAddr
 					 }
 				 }
 			 }
 
+			print "IF" dBash "DEV=" "\"" dName "\""
 			if (dAdIn != 0) print "IF" dBash "INT=" dAdIn
-			if (dMask != "") print "IF" dBash "MSK=" dMask
+			if (dMask != "") print "IF" dBash "MSK=\"" dMask "\""
 			if (dAlia != "" && dAlia != dAddr) print "IF" dBash "IPA=\"" dAlia "\""
-			if (dAdd6 != "") print "IF" dBash "IP6=" dAdd6
-			if (dPfx6 != "") print "IF" dBash "PF6=" dPfx6
+			if (dAdd6 != "") print "IF" dBash "IP6=\"" dAdd6 "\""
+			if (dPfx6 != "") print "IF" dBash "PF6=\"" dPfx6 "\""
 			if (dMacA != "") print "IF" dBash "MAC=" dMacA
 			if (dType != "") print "IF" dBash "TYPE=" dType
 			if (dMedi != "") print "IF" dBash "MED=" dMedi
+			if (dMedi != "") print "IF" dBash "SPD=\"" dFast "\""
 			if (dMemb != "") print "IF" dBash "MEM=\"" dMemb "\""
 			if (dActi != "") print "IF" dBash "ACT=" dActi
 			if (dStat != "") print "IF" dBash "UP=" dStat
@@ -167,68 +193,43 @@ IfProbe()
 
 			# Switch is a gnu awk extension
 			if ("tunnel" == dType)
-				dTun = dTun == "" ? dName : dTun " " dName
+				dTun = dTun == "" ? dBash : dTun " " dBash
 			else if ("loop" == dType)		# Localhost
-				dLoc = dLoc == "" ? dName : dLoc " " dName
+				dLoc = dLoc == "" ? dBash : dLoc " " dBash
 			else if ("slave" == dType)		# Localhost
-				dSlave = dSlave == "" ? dName : dSlave " " dName
+				dSlave = dSlave == "" ? dBash : dSlave " " dBash
 			else if ("bridge" == dType)
-				dMstr = dMstr == "" ? dName : dMstr " " dName
-			else if (dName ~ /^awdl/ || dName ~ /^llw/)		# Apple Wireless Direct / Low Latency Wireless
-				dOther = dOther == "" ? dName : dOther " " dName
-			else if ("wifi" == dType || (gOS == "Linux" && dName ~ /^w/))	# Can not see a way to identify on Linux other than first character
-				dWifi = dWifi == "" ? dName : dWifi " " dName
+				dMstr = dMstr == "" ? dBash : dMstr " " dBash
+			else if (dBash ~ /^awdl/ || dBash ~ /^llw/)		# Apple Wireless Direct / Low Latency Wireless
+				dOther = dOther == "" ? dBash : dOther " " dBash
+			else if ("wifi" == dType)
+				dWifi = dWifi == "" ? dBash : dWifi " " dBash
 			else if ("virtual" == dType)
-				dVir = dVir == "" ? dName : dVir " " dName
+				dVir = dVir == "" ? dBash : dVir " " dBash
 			else if ("ether" == dType || "bridge" == dType)
 			 {
-				dEth = dEth == "" ? dName : dEth " " dName
+				dEth = dEth == "" ? dBash : dEth " " dBash
 				if ("ether" == dType)
 				 {
 					++ dECnt
+					# Really, we should see if this IP is on existing IP network and not consider gateway if so?
 					dGate = dGate + ac
 				 }
-				# print "** IN: " dAdIn " : " ac " : " dInt " : " dExt " : " dAddr
+				# print "NOTE=\"** IN: " dAdIn " : " ac " : " dInt " : " dExt " : " dAddr ":" dBash "\""
 				if (ac > 0)
 				 {
 					# Logic should be if Pub - Ext = Pub, If one Ext = One, If two priv Ext = lower IP (convention only - affects this stanza and dLip above)
-					dAEth = dAEth == "" ? dName : dAEth " " dName
-					if (dAdIn > 1)
+					dAEth = dAEth == "" ? dBash : dAEth " " dBash
+					if (!dAdIn)
 					 {
-						if (dExt == "")		# If only one active, it is "External"
-						 {
-							dGIP = dAddr
-							dExt = dName
-						 }
-						else if (IPcmp(dAddr, dGIP) < 0)
-						 {
-							dInt = dInt == "" ? dExt : dInt " " dExt
-							dExt = dName
-							dGIP = dAddr
-						 }
-						else
-							dInt = dInt == "" ? dName : dInt " " dName
-					 }
-					else if (dAdIn < 0)
-					 {
-						if (dGIP != "")
-						 {
-							dInt = dInt == "" ? dExt : dInt " " dExt
-							dExt = ""
-							dGIP = ""
-						 }
-						dExt = dExt == "" ? dName : dExt " " dName
-					 }
-					else if (!dAdIn)
-					 {
-						e = "NoIPbutActive=" dName
+						e = "NoIPbutActive=" dBash
 						dErr = dErr == "" ? e : dErr ":" e
-						print "IF" dName "ERR=NoIP"
+						print "IF" dBash "ERR=NoIP"
 					 }
 				 }
 			 }
 			else
-				dOther = (dOther == "") ? dName : dOther " " dName
+				dOther = (dOther == "") ? dBash : dOther " " dBash
 
 			Empty()
 		 }
@@ -247,16 +248,17 @@ IfProbe()
 			dActive = ""
 			dRun = ""
 			dLoc = ""
-			dLan = ""
-			dWan = ""
-			dLip = ""
-			dVip = ""
-			dWip = ""
-			dInt = ""
-			dExt = ""
-			dVir = ""
-			dTun = ""
-			dGIP = ""
+			dLan = ""	# Devices with private IPs only
+			dWan = ""	# Devices with public IPs
+			dLip = ""	# Local IPs in use
+			dVip = ""	# Virtual IPs in use
+			dWip = ""	# Public IPs in use
+			dInt = ""	# Device is up, we have dExt with public or > IP address and this has dLip / private IP
+			dExt = ""	# Device is up and assigned an IP (Public if == dWan, Private if dLan
+			dTbd = ""	# Can not determine dExt - drop all non virtual / local devices in here for dhcpcd
+			dVir = ""	# Virtual devices
+			dTun = ""	# Tunnel devices
+			dGIP = ""	# Not sure
 			dECnt = 0
 			dGate = 0
 			Empty();
@@ -307,7 +309,8 @@ IfProbe()
 
 				if ((atLoc = index(dName, "@")) > 0)
 					dName = substr(dName, 0, atLoc - 1)
-				if ((gsub("\\.", "_", dName) > 0) || (index(dName, "docker") > 0) || (index(dName, "lxcbr") > 0) || (index(dName, "virbr") > 0) || (atLoc > 0))
+
+				if ((gsub("\\.", "_", dName) > 0) || (index(dName, "docker") > 0) || (index(dName, "lxcbr") > 0) || (index(dName, "fwbr") > 0) || (index(dName, "virbr") > 0) || (atLoc > 0))
 					dType = "virtual"
 				else if (((atLoc = index(dName, "-")) > 0) || (1 == index(dName, "vmbr")) || (1 == index(dName, "br")))
 				 {
@@ -322,8 +325,8 @@ IfProbe()
 			 {
 				if ($2 !~ /^169.254\./)
 				 {
-					dAddr = $2
-					dMask = $4
+					dAddr = dAddr == "" ? $2 : dAddr " " $2
+					dMask = dMask == "" ? $4 : dMask " " $4
 					dCast = $6
 					split(dAddr, a, "/")
 					dAddr=a[1]
@@ -334,13 +337,15 @@ IfProbe()
 			 }
 			else if ("inet6" == $1)
 			 {
-				dAdd6 = $2
-				dPfx6 = $4
-				split(dAdd6, a, "/")
-				dAdd6=a[1]
-				if (a[2] != "") dPfx6=a[2]
-				split(dAdd6, a, "%")
-				dAdd6=a[1]
+				d6 = $2
+				p6 = $4
+				split(d6, a, "/")
+				d6=a[1]
+				if (a[2] != "") p6=a[2]
+				split(d6, a, "%")
+				d6=a[1]
+				dAdd6 = dAdd6 == "" ? d6 : dAdd6 " " d6
+				dPfx6 = dPfx6 == "" ? p6 : dPfx6 " " p6
 				if (dActi == "running") dActi = "active"
 			 }
 			else if ($1 ~ /link\/.*/)
@@ -380,7 +385,12 @@ IfProbe()
 				dPID = $4
 			else if ("media:" == $1)
 			 {
+				# Darwin: media: autoselect (1000baseT <full-duplex>)
+				# FreeBSD: media: Ethernet autoselect (1000baseT <full-duplex>)
 				dMedi = $2
+				lp = index($0, "(")
+				rp = index($0, ")")
+				if (rp > lp) dFast = substr($0, lp + 1, rp - lp - 1)
 				if (dMedi == "Ethernet" || $0 ~ /.*-duplex.*/)	# Not on Darwin  || dMedi == "autoselect")
 					dType = "ether"
 				if (dMedi ~ /.*unknown.*/)
@@ -414,11 +424,24 @@ IfProbe()
 			if (dName != "")
 				IfOut();
 
-			# If no ethernet active... we will take a wifi
-			if (dWifi != "" && dExt == "")
-				dExt = dWifi
+			# /var/run/env has overrides (put there by e.g. dhcpcd et al) - this should be taken care of above and may be redundant
+			if (gIFEXT != "")
+				dExt = gIFEXT
+			else if (dWan != "")
+				dExt = dWan
+			else if (dLan != "")
+				dExt = dLan
 
-			print "IFSUPV=1.1.5.2024.02.18"			# Version of me
+			if (dExt != "")
+			 {
+				if (gIFINT != "")
+					dInt = gIFINT
+				else if (dWip != "")
+					dInt = dLan
+			 }
+
+			print "IFSUP=:"							# Use $IFSUP . $0 to only run me once
+			print "IFSUPV=1.3.0.2024.06.24"			# Version of me
 			print "IFALL=\"" dAll "\""				# All Devices
 			print "IFAUTO=\"" dAut "\""				# Auto Config Devices
 			print "IFAIP=\"" dAip "\""				# Auto Config IPs
@@ -439,10 +462,11 @@ IfProbe()
 			print "IFWIP=\"" dWip "\""				# Public IP devices
 			print "IFINT=\"" dInt "\""				# Internal IP ethernet
 			print "IFEXT=\"" dExt "\""				# External IP ethernet
+			print "IFTBD=\"" dTbd "\""				# No determinable assigned interface? List for dhcpcd
 			print "IFVIR=\"" dVir "\""				# Virtual Interface (docker etc.)
 			print "IFENUM=" dECnt					# Ethernet Device count
 			print "IFGATE=" (dGate >= 2)			# Two or more connected ethernet ports?
-			print "IFSUP=:"							# Use $IFSUP . $0 to only run me once
+
 			if (1>2) print "IFV() \n {\n\teval IFQ=\\$IF$1$2\n }\n"	# Example: IFV lo0 IP; echo $IFQ
 			if (dErr != "")
 				print "IFSUPERR=" dErr
